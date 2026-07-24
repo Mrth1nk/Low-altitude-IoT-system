@@ -14,6 +14,7 @@ from shared_protocol.frame import Frame, MessageType, decode_frame, encode_frame
 
 class AircraftTransportTests(unittest.TestCase):
     def setUp(self):
+        self.now = 0.0
         self.peer = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.peer.bind(("127.0.0.1", 0))
         self.peer.settimeout(0.5)
@@ -23,6 +24,9 @@ class AircraftTransportTests(unittest.TestCase):
             local_host="127.0.0.1",
             local_port=0,
             peer=self.peer.getsockname(),
+            clock=lambda: self.now,
+            status_timeout=3.0,
+            retry_backoff=0.01,
         )
         self.command_id = uuid.UUID("00112233-4455-6677-8899-aabbccddeeff")
 
@@ -47,7 +51,21 @@ class AircraftTransportTests(unittest.TestCase):
             time.sleep(0.001)
         self.fail("transport did not reach expected state")
 
+    def send_status(self, state="locked", detail="optical_locked", source=None):
+        source = source or self.peer
+        frame = Frame(
+            MessageType.STATUS,
+            0,
+            2,
+            uuid.uuid4(),
+            {"state": state, "detail": detail},
+        )
+        source.sendto(encode_frame(frame), self.transport.local_address)
+        time.sleep(0.005)
+        self.transport.pump(self.now)
+
     def test_due_frame_reaches_udp_peer_and_matching_ack_clears_pending(self):
+        self.send_status()
         self.queue()
         self.transport.pump(now=0.0)
         data, sender = self.peer.recvfrom(4096)
@@ -68,6 +86,7 @@ class AircraftTransportTests(unittest.TestCase):
         self.assertEqual(self.transport.transaction_state()["stage"], "acknowledged")
 
     def test_mismatched_ack_does_not_clear_pending(self):
+        self.send_status()
         self.queue()
         self.transport.pump(now=0.0)
         data, sender = self.peer.recvfrom(4096)
@@ -120,7 +139,60 @@ class AircraftTransportTests(unittest.TestCase):
             self.transport.status()["link_detail"], "optical_lost"
         )
 
+    def test_blocked_received_before_send_cancels_transaction_and_never_resends(self):
+        self.send_status()
+        self.queue()
+        blocked = Frame(
+            MessageType.LINK_BLOCKED,
+            0,
+            30,
+            uuid.uuid4(),
+            {"reason": "beam_interrupted"},
+        )
+        self.peer.sendto(encode_frame(blocked), self.transport.local_address)
+        time.sleep(0.005)
+        self.transport.pump(self.now)
+
+        self.peer.settimeout(0.03)
+        with self.assertRaises(socket.timeout):
+            self.peer.recvfrom(4096)
+        state = self.transport.transaction_state()
+        self.assertEqual(state["stage"], "link_blocked")
+        self.assertEqual(state["pending"], 0)
+
+        self.send_status()
+        self.transport.pump(self.now + 0.1)
+        with self.assertRaises(socket.timeout):
+            self.peer.recvfrom(4096)
+        self.assertEqual(
+            self.transport.transaction_state()["stage"], "link_blocked"
+        )
+
+    def test_rejects_valid_frame_from_wrong_source_port(self):
+        attacker = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        attacker.bind(("127.0.0.1", 0))
+        try:
+            self.send_status(source=attacker)
+            self.assertEqual(self.transport.optical_state(), "blocked")
+            self.assertEqual(self.transport.peer, self.peer.getsockname())
+        finally:
+            attacker.close()
+
+    def test_locked_status_expires_to_blocked_and_cancels_pending(self):
+        self.send_status()
+        self.assertEqual(self.transport.optical_state(), "locked")
+        self.queue()
+        self.now = 3.01
+        self.transport.pump(self.now)
+
+        self.assertEqual(self.transport.optical_state(), "blocked")
+        state = self.transport.transaction_state()
+        self.assertEqual(state["stage"], "link_blocked")
+        self.assertEqual(state["pending"], 0)
+        self.assertEqual(self.transport.status()["link_detail"], "status_timeout")
+
     def test_retries_exhaust_into_transaction_error(self):
+        self.send_status()
         self.queue()
         self.transport.pump(now=0.0)
         first_data, sender = self.peer.recvfrom(4096)
@@ -150,7 +222,8 @@ class AircraftTransportTests(unittest.TestCase):
             self.transport.transaction_state()["stage"], "retry_exhausted"
         )
 
-    def test_udp_send_error_is_exposed_as_transaction_error(self):
+    def test_udp_send_error_recreates_socket_and_retries_transaction(self):
+        self.send_status()
         self.queue()
         real_socket = self.transport._socket
 
@@ -170,11 +243,17 @@ class AircraftTransportTests(unittest.TestCase):
         self.transport._socket = FailingSocket()
         state = self.transport.pump(now=0.0)
 
-        self.assertEqual(state["stage"], "transport_error")
-        self.assertEqual(state["pending"], 0)
+        self.assertEqual(state["stage"], "transport_retry")
+        self.assertEqual(state["pending"], 1)
         self.assertIn("network down", state["error"])
+        self.transport._socket_factory = socket.socket
+        self.now = 0.02
+        self.transport.pump(self.now)
+        data, _ = self.peer.recvfrom(4096)
+        self.assertEqual(decode_frame(data).command_id, self.command_id)
 
-    def test_udp_receive_error_is_terminal_for_current_transaction(self):
+    def test_udp_receive_error_recreates_socket_without_cancelling_transaction(self):
+        self.send_status()
         self.queue()
         real_socket = self.transport._socket
 
@@ -194,11 +273,50 @@ class AircraftTransportTests(unittest.TestCase):
         self.transport._socket = ReceiveFailingSocket()
         state = self.transport.pump(now=0.0)
 
-        self.assertEqual(state["stage"], "transport_error")
-        self.assertEqual(state["pending"], 0)
+        self.assertEqual(state["stage"], "transport_retry")
+        self.assertEqual(state["pending"], 1)
         self.assertIn("socket closed", state["error"])
 
+    def test_transport_error_when_idle_is_not_scoped_to_previous_transaction(self):
+        self.send_status()
+        self.queue()
+        self.transport.pump(now=0.0)
+        data, sender = self.peer.recvfrom(4096)
+        sent = decode_frame(data)
+        ack = Frame(
+            MessageType.ACK,
+            0,
+            90,
+            sent.command_id,
+            {"acked_sequence": sent.sequence},
+        )
+        self.peer.sendto(encode_frame(ack), sender)
+        time.sleep(0.005)
+        self.transport.pump(now=0.01)
+        self.assertEqual(
+            self.transport.transaction_state()["stage"], "acknowledged"
+        )
+
+        real_socket = self.transport._socket
+
+        class ReceiveFailingSocket:
+            def recvfrom(self, size):
+                raise OSError("idle receive failure")
+
+            def close(self):
+                real_socket.close()
+
+            def getsockname(self):
+                return real_socket.getsockname()
+
+        self.transport._socket = ReceiveFailingSocket()
+        state = self.transport.pump(now=0.02)
+
+        self.assertEqual(state["stage"], "transport_retry")
+        self.assertEqual(state["error_transaction_id"], "")
+
     def test_nack_updates_transaction_error_and_clears_matching_frame(self):
+        self.send_status()
         self.queue()
         self.transport.pump(now=0.0)
         data, sender = self.peer.recvfrom(4096)
@@ -294,6 +412,10 @@ class StartupImportTests(unittest.TestCase):
             f"ExecStart={repo}/rdk_agent/start_rover_stack.sh", result.stdout
         )
         self.assertIn(f"PYTHONPATH={repo}", result.stdout)
+        self.assertIn("preflight imports ok", result.stdout)
+        self.assertIn("backup existing units/scripts", result.stdout)
+        self.assertIn("health-check services", result.stdout)
+        self.assertIn("rollback on failure", result.stdout)
 
     def test_start_fails_clearly_when_shared_protocol_is_missing(self):
         repo = Path(__file__).resolve().parents[2]
@@ -313,6 +435,48 @@ class StartupImportTests(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("shared_protocol", result.stderr)
         self.assertIn("full repository", result.stderr)
+
+    def test_wifi_scripts_default_to_woshinailong_without_tracked_password(self):
+        repo = Path(__file__).resolve().parents[2]
+        configure = (repo / "rdk_agent/configure_demo_mengchuang.sh").read_text()
+        installer = (
+            repo / "rdk_agent/install_mengchuang_boot_service.sh"
+        ).read_text()
+        l610 = (repo / "rdk_agent/configure_l610_primary.sh").read_text()
+        diagnostic = (repo / "rdk_agent/test_mengchuang_link.sh").read_text()
+
+        self.assertIn('MENGCHUANG_SSID:-woshinailong', configure)
+        self.assertIn('MENGCHUANG_CONNECTION:-woshinailong', installer)
+        self.assertIn('MENGCHUANG_CONNECTION:-woshinailong', l610)
+        self.assertIn('MENGCHUANG_SSID:-woshinailong', diagnostic)
+        self.assertNotIn('MENGCHUANG_PASSWORD:-mengchuang', configure)
+        self.assertNotIn('MENGCHUANG_PASSWORD:-mengchuang', diagnostic)
+        self.assertIn('PASSWORD="${MENGCHUANG_PASSWORD:-}"', configure)
+        self.assertIn('PASSWORD="${MENGCHUANG_PASSWORD:-}"', diagnostic)
+        self.assertIn("ipv4.never-default yes", installer)
+        self.assertIn("ipv6.never-default yes", installer)
+
+    def test_wifi_installer_dry_run_has_preflight_backup_health_and_rollback(self):
+        repo = Path(__file__).resolve().parents[2]
+        env = dict(os.environ)
+        env["DRY_RUN"] = "1"
+        env["REPO_ROOT"] = str(repo)
+
+        result = subprocess.run(
+            ["bash", "rdk_agent/install_mengchuang_boot_service.sh"],
+            cwd=repo,
+            env=env,
+            text=True,
+            capture_output=True,
+            timeout=5,
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("woshinailong", result.stdout)
+        self.assertIn("preflight imports ok", result.stdout)
+        self.assertIn("backup existing units/scripts", result.stdout)
+        self.assertIn("health-check services", result.stdout)
+        self.assertIn("rollback on failure", result.stdout)
 
 
 if __name__ == "__main__":

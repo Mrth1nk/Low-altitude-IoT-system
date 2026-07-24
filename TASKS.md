@@ -105,6 +105,12 @@
 
 ## Deferred
 
+- Task 11: ground-station full-mission editor and OpenAPI mission payload/filtering.
+  The runtime accepts normalized complete mission payloads, but this task deliberately
+  does not change either ground-station implementation or its per-point UI.
+- Local macOS system Python 3.9 does not include `paho-mqtt`; pure root tests stay
+  isolated from that optional import. Run the Tuya authentication baseline in the
+  RDK virtual environment, where the dependency is installed.
 - Improve RDK README IP examples from old `192.168.43.175` to current development hotspot IP pattern.
 - Add a one-command health report script for RDK network, L610, Tuya MQTT, rover FC, and aircraft gateway.
 - Add browser-side indicator that explicitly shows whether aircraft command downlink is blocked because `aircraft_state.json` is stale.

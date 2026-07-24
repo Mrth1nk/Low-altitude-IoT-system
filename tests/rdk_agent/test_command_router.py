@@ -103,20 +103,22 @@ class CommandRouterTests(unittest.TestCase):
 
     def test_active_transaction_state_is_compact_and_contains_no_command_payload(self):
         telemetry = RoverTelemetry(
-            transaction_stage="awaiting_ack",
-            transaction_id="00112233-4455-6677-8899-aabbccddeeff",
-            transaction_pending=4,
+            aircraft_transaction_stage="awaiting_ack",
+            aircraft_transaction_id="00112233-4455-6677-8899-aabbccddeeff",
+            aircraft_transaction_pending=4,
         )
 
         data = telemetry.data()
 
-        self.assertEqual(data["tx_stage"], "awaiting_ack")
-        self.assertEqual(data["tx_pending"], 4)
+        self.assertEqual(data["aircraft_tx_stage"], "awaiting_ack")
+        self.assertEqual(data["aircraft_tx_pending"], 4)
         self.assertNotIn("payload", data)
         self.assertNotIn("secret", repr(data).lower())
         compact = telemetry.tuya_compact_payload()["data"]["rover_state"]["value"]
         self.assertLessEqual(len(compact.encode("utf-8")), 480)
-        self.assertEqual(json.loads(compact)["tx_stage"], "awaiting_ack")
+        self.assertEqual(
+            json.loads(compact)["aircraft_tx_stage"], "awaiting_ack"
+        )
 
 
 if __name__ == "__main__":

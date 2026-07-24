@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-SSID="${MENGCHUANG_SSID:-mengchuang}"
-PASSWORD="${MENGCHUANG_PASSWORD:-mengchuang}"
+SSID="${MENGCHUANG_SSID:-woshinailong}"
+PASSWORD="${MENGCHUANG_PASSWORD:-}"
 PHONE_CONNECTION="${PHONE_CONNECTION:-Mr.think的Mate 70 Pro+}"
 LOG="${MENGCHUANG_DEMO_LOG:-/tmp/mengchuang-demo.log}"
 
@@ -17,7 +17,13 @@ LOG="${MENGCHUANG_DEMO_LOG:-/tmp/mengchuang-demo.log}"
     exit 2
   fi
 
-  nmcli con show "${SSID}" >/dev/null 2>&1 || nmcli dev wifi connect "${SSID}" password "${PASSWORD}" ifname wlan0
+  if ! nmcli con show "${SSID}" >/dev/null 2>&1; then
+    if [ -z "${PASSWORD}" ]; then
+      echo "ERROR: no saved NetworkManager connection for ${SSID}; set MENGCHUANG_PASSWORD to create it"
+      exit 3
+    fi
+    nmcli dev wifi connect "${SSID}" password "${PASSWORD}" ifname wlan0
+  fi
   sudo nmcli con mod "${SSID}" connection.autoconnect yes ipv4.never-default yes ipv4.route-metric 950 ipv6.never-default yes ipv6.route-metric 950
   sudo nmcli con mod "${PHONE_CONNECTION}" connection.autoconnect yes ipv4.never-default yes ipv4.route-metric 900 ipv6.never-default yes ipv6.route-metric 900 || true
   sudo nmcli con up "${SSID}" ifname wlan0

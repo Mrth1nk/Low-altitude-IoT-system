@@ -3,7 +3,6 @@
 import hashlib
 import json
 from collections import OrderedDict
-import uuid
 
 from shared_protocol.frame import Frame, MessageType, decode_frame, encode_frame
 from shared_protocol.messages import MAX_MISSION_ITEMS
@@ -11,18 +10,31 @@ from shared_protocol.transport import RetrySender
 
 
 class AircraftLink:
-    def __init__(self, max_attempts=4, retry_interval=0.5):
+    def __init__(
+        self,
+        max_attempts=4,
+        retry_interval=0.5,
+        history_limit=128,
+    ):
+        if history_limit < 1:
+            raise ValueError("history_limit must be positive")
         self.sender = RetrySender(max_attempts, retry_interval)
         self._next_sequence = 0
         self._stage = "idle"
         self._error = ""
         self._transaction_id = ""
+        self._active_command_id = None
+        self._revision = 0
         self._terminal = OrderedDict()
-        self._terminal_limit = 1024
+        self._terminal_limit = int(history_limit)
 
     @property
     def pending_count(self):
         return self.sender.pending_count
+
+    @property
+    def active_command_id(self):
+        return self._active_command_id
 
     def _sequence(self):
         result = self._next_sequence
@@ -37,9 +49,12 @@ class AircraftLink:
     def execute(self, command, now=None):
         if command.target != "aircraft":
             raise ValueError("AircraftLink accepts aircraft commands only")
+        if self._active_command_id is not None:
+            raise ValueError("aircraft transaction already active")
         if command.command_id in self._terminal:
             raise ValueError("aircraft transaction is already terminal")
         now = 0.0 if now is None else float(now)
+        self._active_command_id = command.command_id
         self._transaction_id = str(command.command_id)
         self._error = ""
         if command.action == "mission":
@@ -50,7 +65,7 @@ class AircraftLink:
             {"action": command.action, "parameters": dict(command.payload)},
             now,
         )
-        self._stage = "queued"
+        self._set_stage("queued")
         return {"stage": "queued", "frame_count": 1}
 
     def _stage_mission(self, command, now):
@@ -99,7 +114,7 @@ class AircraftLink:
             },
             now,
         )
-        self._stage = "staged"
+        self._set_stage("staged")
         return {"stage": "staged", "frame_count": len(normalized) + 2}
 
     @staticmethod
@@ -125,7 +140,7 @@ class AircraftLink:
         due = self.sender.due(now)
         exhausted = self.sender.pop_exhausted()
         if due and not exhausted:
-            self._stage = "awaiting_ack"
+            self._set_stage("awaiting_ack")
         if exhausted:
             for command_id, sequence in exhausted:
                 self._set_terminal(
@@ -147,8 +162,12 @@ class AircraftLink:
         accepted = self.sender.acknowledge(
             frame.command_id, frame.payload["acked_sequence"]
         )
-        if accepted and self.pending_count == 0:
-            self._stage = "acknowledged"
+        if (
+            accepted
+            and self.pending_count == 0
+            and frame.command_id == self._active_command_id
+        ):
+            self._set_terminal(frame.command_id, "acknowledged", "")
         return accepted
 
     def accept_response(self, frame):
@@ -170,9 +189,9 @@ class AircraftLink:
         return accepted
 
     def fail_transaction(self, stage, error, command_id=None):
-        if stage not in ("retry_exhausted", "transport_error"):
+        if stage not in ("retry_exhausted", "link_blocked"):
             raise ValueError("invalid terminal transaction stage")
-        command_id = command_id or self._current_command_id()
+        command_id = command_id or self._active_command_id
         if command_id is None:
             return False
         if command_id in self._terminal:
@@ -180,26 +199,38 @@ class AircraftLink:
         self._set_terminal(command_id, stage, str(error)[:120])
         return True
 
-    def _current_command_id(self):
-        if not self._transaction_id:
-            return None
-        return uuid.UUID(self._transaction_id)
-
     def _set_terminal(self, command_id, stage, error):
         self.sender.cancel(command_id)
-        self._terminal[command_id] = (stage, error)
+        self._revision += 1
+        self._terminal[command_id] = {
+            "command_id": str(command_id),
+            "stage": stage,
+            "error": error,
+            "revision": self._revision,
+        }
         self._terminal.move_to_end(command_id)
         while len(self._terminal) > self._terminal_limit:
             self._terminal.popitem(last=False)
         if str(command_id) == self._transaction_id:
             self._stage = stage
             self._error = error
+        if command_id == self._active_command_id:
+            self._active_command_id = None
+
+    def _set_stage(self, stage):
+        if stage != self._stage:
+            self._stage = stage
+            self._revision += 1
+
+    def event_history(self):
+        return [dict(item) for item in self._terminal.values()]
 
     def transaction_state(self):
         state = {
             "stage": self._stage,
             "pending": self.pending_count,
             "transaction_id": self._transaction_id,
+            "revision": self._revision,
         }
         if self._error:
             state["error"] = self._error

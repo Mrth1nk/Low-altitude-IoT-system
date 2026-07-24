@@ -10,6 +10,13 @@ if [ ! -f "$REPO_ROOT/shared_protocol/__init__.py" ] || [ ! -x "$RDK_DIR/start_r
   exit 2
 fi
 
+PYTHON_BIN="${PYTHON_BIN:-$RDK_DIR/.venv/bin/python}"
+if [ ! -x "$PYTHON_BIN" ]; then
+  PYTHON_BIN="${PYTHON_FALLBACK:-python3}"
+fi
+PYTHONPATH="$REPO_ROOT" "$PYTHON_BIN" -c \
+  "import shared_protocol; import rdk_agent.aircraft_link; import rdk_agent.aircraft_transport"
+
 render_rover_service() {
   cat <<EOF
 [Unit]
@@ -36,13 +43,94 @@ EOF
 }
 
 if [ "${DRY_RUN:-0}" = "1" ]; then
+  echo "preflight imports ok"
+  echo "backup existing units/scripts"
+  echo "rollback on failure"
+  echo "health-check services"
   render_rover_service
   exit 0
 fi
 
-sudo install -m 0755 "${RDK_DIR}/configure_l610_primary.sh" /usr/local/sbin/uav-configure-l610-primary
+CONFIG_TARGET="/usr/local/sbin/uav-configure-l610-primary"
+L610_UNIT="/etc/systemd/system/uav-l610-primary.service"
+ROVER_UNIT="/etc/systemd/system/uav-rover-stack.service"
+BACKUP_DIR="$(mktemp -d /tmp/low-altitude-rdk-install.XXXXXX)"
+CONFIG_EXISTED=0
+L610_EXISTED=0
+ROVER_EXISTED=0
+L610_WAS_ENABLED=0
+L610_WAS_ACTIVE=0
+ROVER_WAS_ENABLED=0
+ROVER_WAS_ACTIVE=0
+if sudo test -e "$CONFIG_TARGET"; then
+  sudo cp -a "$CONFIG_TARGET" "$BACKUP_DIR/configure"
+  CONFIG_EXISTED=1
+fi
+if sudo test -e "$L610_UNIT"; then
+  sudo cp -a "$L610_UNIT" "$BACKUP_DIR/l610-unit"
+  L610_EXISTED=1
+fi
+if sudo test -e "$ROVER_UNIT"; then
+  sudo cp -a "$ROVER_UNIT" "$BACKUP_DIR/rover-unit"
+  ROVER_EXISTED=1
+fi
+if systemctl is-enabled --quiet uav-l610-primary.service 2>/dev/null; then
+  L610_WAS_ENABLED=1
+fi
+if systemctl is-active --quiet uav-l610-primary.service 2>/dev/null; then
+  L610_WAS_ACTIVE=1
+fi
+if systemctl is-enabled --quiet uav-rover-stack.service 2>/dev/null; then
+  ROVER_WAS_ENABLED=1
+fi
+if systemctl is-active --quiet uav-rover-stack.service 2>/dev/null; then
+  ROVER_WAS_ACTIVE=1
+fi
 
-sudo tee /etc/systemd/system/uav-l610-primary.service >/dev/null <<'EOF'
+rollback() {
+  set +e
+  for spec in \
+    "$CONFIG_EXISTED:$BACKUP_DIR/configure:$CONFIG_TARGET" \
+    "$L610_EXISTED:$BACKUP_DIR/l610-unit:$L610_UNIT" \
+    "$ROVER_EXISTED:$BACKUP_DIR/rover-unit:$ROVER_UNIT"; do
+    existed="${spec%%:*}"
+    rest="${spec#*:}"
+    backup="${rest%%:*}"
+    target="${rest#*:}"
+    if [ "$existed" = "1" ]; then
+      sudo cp -a "$backup" "$target"
+    else
+      sudo rm -f "$target"
+    fi
+  done
+  sudo systemctl daemon-reload
+  if [ "$L610_WAS_ENABLED" = "1" ]; then
+    sudo systemctl enable uav-l610-primary.service
+  else
+    sudo systemctl disable uav-l610-primary.service
+  fi
+  if [ "$L610_WAS_ACTIVE" = "1" ]; then
+    sudo systemctl restart uav-l610-primary.service
+  else
+    sudo systemctl stop uav-l610-primary.service
+  fi
+  if [ "$ROVER_WAS_ENABLED" = "1" ]; then
+    sudo systemctl enable uav-rover-stack.service
+  else
+    sudo systemctl disable uav-rover-stack.service
+  fi
+  if [ "$ROVER_WAS_ACTIVE" = "1" ]; then
+    sudo systemctl restart uav-rover-stack.service
+  else
+    sudo systemctl stop uav-rover-stack.service
+  fi
+  echo "installation failed; previous RDK services restored" >&2
+}
+trap rollback ERR
+
+sudo install -m 0755 "${RDK_DIR}/configure_l610_primary.sh" "$CONFIG_TARGET"
+
+sudo tee "$L610_UNIT" >/dev/null <<'EOF'
 [Unit]
 Description=Keep UAV Tuya traffic on Fibocom L610 and Wi-Fi telemetry local
 After=NetworkManager.service
@@ -57,7 +145,7 @@ RemainAfterExit=yes
 WantedBy=multi-user.target
 EOF
 
-render_rover_service | sudo tee /etc/systemd/system/uav-rover-stack.service >/dev/null
+render_rover_service | sudo tee "$ROVER_UNIT" >/dev/null
 
 sudo systemctl daemon-reload
 sudo systemctl disable --now uav-mengchuang-link.service 2>/dev/null || true
@@ -65,8 +153,12 @@ sudo systemctl enable uav-l610-primary.service
 sudo systemctl enable uav-rover-stack.service
 sudo systemctl restart uav-l610-primary.service
 sudo systemctl restart uav-rover-stack.service
+sudo systemctl is-active --quiet uav-l610-primary.service
+sudo systemctl is-active --quiet uav-rover-stack.service
 
-systemctl --no-pager --full status uav-l610-primary.service || true
-systemctl --no-pager --full status uav-rover-stack.service || true
+trap - ERR
+rm -rf "$BACKUP_DIR"
+systemctl --no-pager --full status uav-l610-primary.service
+systemctl --no-pager --full status uav-rover-stack.service
 ip route || true
 ip route get 139.196.6.123 || true

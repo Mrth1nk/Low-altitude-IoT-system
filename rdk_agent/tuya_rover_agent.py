@@ -269,11 +269,28 @@ def run_agent(config: dict) -> int:
                     if command.target == "aircraft"
                     else command.action
                 )
-                telemetry.mission_status = message if ok else "command_failed"
-                telemetry.fault_text = "" if ok else message
-                telemetry.transaction_stage = str(result.get("stage", "unknown"))
-                telemetry.transaction_id = str(command.command_id)
-                telemetry.transaction_pending = aircraft_link.pending_count
+                if command.target == "aircraft":
+                    telemetry.aircraft_transaction_stage = str(
+                        result.get("stage", "unknown")
+                    )
+                    telemetry.aircraft_transaction_id = str(command.command_id)
+                    telemetry.aircraft_transaction_pending = (
+                        aircraft_link.pending_count
+                    )
+                    telemetry.aircraft_mission_status = (
+                        message if ok else "command_failed"
+                    )
+                    telemetry.aircraft_fault_text = "" if ok else message
+                else:
+                    telemetry.mission_status = (
+                        message if ok else "command_failed"
+                    )
+                    telemetry.fault_text = "" if ok else message
+                    telemetry.rover_transaction_stage = str(
+                        result.get("stage", "unknown")
+                    )
+                    telemetry.rover_transaction_id = str(command.command_id)
+                    telemetry.rover_transaction_pending = 0
                 rover_command = result.get("rover_command")
                 if ok and rover_command and rover_command.command in ("manual", "drive") and (rover_command.steering or rover_command.throttle):
                     manual_active_until = time.time() + 1.8
@@ -285,16 +302,8 @@ def run_agent(config: dict) -> int:
                     f"message={message}",
                     flush=True,
                 )
-            transaction = aircraft_transport.pump(now)
-            telemetry.transaction_stage = str(transaction.get("stage", "idle"))
-            telemetry.transaction_id = str(
-                transaction.get("transaction_id", telemetry.transaction_id)
-            )
-            telemetry.transaction_pending = int(transaction.get("pending", 0))
-            transaction_error = str(transaction.get("error", ""))
-            if transaction_error:
-                telemetry.mission_status = telemetry.transaction_stage
-                telemetry.fault_text = transaction_error
+            transaction = aircraft_transport.pump(time.monotonic())
+            telemetry.apply_aircraft_transaction(transaction)
             if telemetry.last_command in ("stop", "arm") and rover.connect(timeout=0.05):
                 rover.neutral()
             if telemetry.last_command in ("manual", "drive") and (telemetry.steering or telemetry.throttle) and time.time() > manual_active_until:

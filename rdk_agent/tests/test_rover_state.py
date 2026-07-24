@@ -72,6 +72,42 @@ class RoverStateTests(unittest.TestCase):
         self.assertLessEqual(len(payload.encode("utf-8")), 480)
         self.assertIn(text, payload)
 
+    def test_rover_and_aircraft_transactions_are_separate_in_compact_state(self):
+        telemetry = RoverTelemetry(
+            rover_transaction_stage="executed",
+            rover_transaction_id="rover-id",
+            rover_transaction_pending=0,
+            aircraft_transaction_stage="acknowledged",
+            aircraft_transaction_id="aircraft-id",
+            aircraft_transaction_pending=0,
+            mission_status="rover waypoint complete",
+            aircraft_mission_status="acknowledged",
+        )
+
+        data = telemetry.data()
+
+        self.assertEqual(data["rover_tx_stage"], "executed")
+        self.assertEqual(data["aircraft_tx_stage"], "acknowledged")
+        self.assertEqual(data["mission_status"], "rover waypoint complete")
+        self.assertEqual(data["aircraft_mission_status"], "acknowledged")
+        self.assertNotIn("tx_stage", data)
+
+    def test_aircraft_terminal_event_updates_once_without_overwriting_rover_status(self):
+        telemetry = RoverTelemetry(mission_status="rover executing")
+        state = {
+            "revision": 7,
+            "stage": "acknowledged",
+            "transaction_id": "aircraft-id",
+            "pending": 0,
+        }
+
+        self.assertTrue(telemetry.apply_aircraft_transaction(state))
+        self.assertEqual(telemetry.aircraft_mission_status, "acknowledged")
+        self.assertEqual(telemetry.mission_status, "rover executing")
+        telemetry.aircraft_mission_status = "operator note"
+        self.assertFalse(telemetry.apply_aircraft_transaction(state))
+        self.assertEqual(telemetry.aircraft_mission_status, "operator note")
+
 
 if __name__ == "__main__":
     unittest.main()

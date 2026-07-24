@@ -140,6 +140,55 @@ class AircraftLinkTests(unittest.TestCase):
         self.assertFalse(self.link.accept_response(late_ack))
         self.assertEqual(self.link.transaction_state()["stage"], "nacked")
 
+    def test_rejects_second_command_while_first_transaction_is_active(self):
+        self.link.execute(self.command("guided"), now=0.0)
+        second = CloudCommand(
+            uuid.uuid4(), 1_800_000_001.0, "aircraft", "land", {}
+        )
+
+        with self.assertRaisesRegex(ValueError, "active"):
+            self.link.execute(second, now=0.0)
+
+        self.assertEqual(self.link.pending_count, 1)
+        self.assertEqual(
+            self.link.transaction_state()["transaction_id"], str(self.command_id)
+        )
+
+    def test_completed_transaction_allows_next_and_history_is_bounded(self):
+        link = AircraftLink(
+            max_attempts=2, retry_interval=1.0, history_limit=2
+        )
+        command_ids = []
+        for action in ("guided", "land", "rtl"):
+            command_id = uuid.uuid4()
+            command_ids.append(command_id)
+            link.execute(
+                CloudCommand(
+                    command_id, 1_800_000_000.0, "aircraft", action, {}
+                ),
+                now=0.0,
+            )
+            frame = decode_frame(link.due_bytes(0.0)[0])
+            self.assertTrue(
+                link.accept_response(
+                    Frame(
+                        MessageType.ACK,
+                        0,
+                        900,
+                        command_id,
+                        {"acked_sequence": frame.sequence},
+                    )
+                )
+            )
+
+        history = link.event_history()
+        self.assertEqual(len(history), 2)
+        self.assertEqual(
+            [item["command_id"] for item in history],
+            [str(command_ids[1]), str(command_ids[2])],
+        )
+        self.assertTrue(all(item["stage"] == "acknowledged" for item in history))
+
 
 if __name__ == "__main__":
     unittest.main()

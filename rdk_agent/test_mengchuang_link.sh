@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-SSID="${MENGCHUANG_SSID:-mengchuang}"
-PASSWORD="${MENGCHUANG_PASSWORD:-mengchuang}"
+SSID="${MENGCHUANG_SSID:-woshinailong}"
+PASSWORD="${MENGCHUANG_PASSWORD:-}"
 RESTORE_CONNECTION="${RESTORE_CONNECTION:-Mr.think的Mate 70 Pro+}"
 HOLD_SECONDS="${1:-60}"
 LOG="${MENGCHUANG_TEST_LOG:-/tmp/mengchuang-test.log}"
@@ -17,7 +17,17 @@ LOG="${MENGCHUANG_TEST_LOG:-/tmp/mengchuang-test.log}"
   sleep 3
   nmcli -t -f SSID,IN-USE,SIGNAL,SECURITY dev wifi list ifname wlan0 || true
   echo "connect ${SSID}"
-  nmcli dev wifi connect "${SSID}" password "${PASSWORD}" ifname wlan0
+  if nmcli con show "${SSID}" >/dev/null 2>&1; then
+    nmcli con mod "${SSID}" ipv4.never-default yes ipv6.never-default yes
+    nmcli con up "${SSID}" ifname wlan0
+  else
+    if [ -z "${PASSWORD}" ]; then
+      echo "MENGCHUANG_PASSWORD is required when NetworkManager has no saved ${SSID} profile" >&2
+      exit 2
+    fi
+    nmcli dev wifi connect "${SSID}" password "${PASSWORD}" ifname wlan0
+    nmcli con mod "${SSID}" ipv4.never-default yes ipv6.never-default yes
+  fi
   echo "connected:"
   nmcli -t -f DEVICE,TYPE,STATE,CONNECTION dev status || true
   ip -br addr wlan0 || true

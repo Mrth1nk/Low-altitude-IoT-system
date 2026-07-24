@@ -33,9 +33,14 @@ def compact_json_bytes(data: dict[str, Any], max_bytes: int = 480) -> str:
             "gps_fix_type",
             "satellites_visible",
             "mission_status",
-            "tx_stage",
-            "tx_id",
-            "tx_pending",
+            "rover_tx_stage",
+            "rover_tx_id",
+            "rover_tx_pending",
+            "aircraft_tx_stage",
+            "aircraft_tx_id",
+            "aircraft_tx_pending",
+            "aircraft_mission_status",
+            "aircraft_fault_text",
             "last_command",
             "aircraft_link",
             "aircraft_age",
@@ -125,9 +130,14 @@ def compact_json_bytes(data: dict[str, Any], max_bytes: int = 480) -> str:
         "gps_fix_type",
         "satellites_visible",
         "mission_status",
-        "tx_stage",
-        "tx_id",
-        "tx_pending",
+        "rover_tx_stage",
+        "rover_tx_id",
+        "rover_tx_pending",
+        "aircraft_tx_stage",
+        "aircraft_tx_id",
+        "aircraft_tx_pending",
+        "aircraft_mission_status",
+        "aircraft_fault_text",
         "steering",
         "throttle",
         "last_command",
@@ -171,9 +181,15 @@ class RoverTelemetry:
     throttle: int = 0
     last_command: str = "none"
     fault_text: str = ""
-    transaction_stage: str = "idle"
-    transaction_id: str = ""
-    transaction_pending: int = 0
+    rover_transaction_stage: str = "idle"
+    rover_transaction_id: str = ""
+    rover_transaction_pending: int = 0
+    aircraft_transaction_stage: str = "idle"
+    aircraft_transaction_id: str = ""
+    aircraft_transaction_pending: int = 0
+    aircraft_transaction_revision: str = ""
+    aircraft_mission_status: str = "idle"
+    aircraft_fault_text: str = ""
     updated_at: float = field(default_factory=time.time)
 
     def data(self) -> dict[str, Any]:
@@ -203,18 +219,52 @@ class RoverTelemetry:
             "fault_text": str(self.fault_text)[:255],
         }
         if (
-            self.transaction_stage != "idle"
-            or self.transaction_id
-            or self.transaction_pending
+            self.rover_transaction_stage != "idle"
+            or self.rover_transaction_id
+            or self.rover_transaction_pending
         ):
             data.update(
                 {
-                    "tx_stage": str(self.transaction_stage)[:24],
-                    "tx_id": str(self.transaction_id)[:36],
-                    "tx_pending": int(clamp(self.transaction_pending, 0, 999)),
+                    "rover_tx_stage": str(self.rover_transaction_stage)[:24],
+                    "rover_tx_id": str(self.rover_transaction_id)[:36],
+                    "rover_tx_pending": int(
+                        clamp(self.rover_transaction_pending, 0, 999)
+                    ),
+                }
+            )
+        if (
+            self.aircraft_transaction_stage != "idle"
+            or self.aircraft_transaction_id
+            or self.aircraft_transaction_pending
+        ):
+            data.update(
+                {
+                    "aircraft_tx_stage": str(
+                        self.aircraft_transaction_stage
+                    )[:24],
+                    "aircraft_tx_id": str(self.aircraft_transaction_id)[:36],
+                    "aircraft_tx_pending": int(
+                        clamp(self.aircraft_transaction_pending, 0, 999)
+                    ),
+                    "aircraft_mission_status": str(
+                        self.aircraft_mission_status
+                    )[:48],
+                    "aircraft_fault_text": str(self.aircraft_fault_text)[:120],
                 }
             )
         return data
+
+    def apply_aircraft_transaction(self, state: dict[str, Any]) -> bool:
+        revision = str(state.get("revision", ""))
+        if revision == self.aircraft_transaction_revision:
+            return False
+        self.aircraft_transaction_revision = revision
+        self.aircraft_transaction_stage = str(state.get("stage", "idle"))
+        self.aircraft_transaction_id = str(state.get("transaction_id", ""))
+        self.aircraft_transaction_pending = int(state.get("pending", 0) or 0)
+        self.aircraft_mission_status = self.aircraft_transaction_stage
+        self.aircraft_fault_text = str(state.get("error", ""))[:120]
+        return True
 
     def tuya_report_payload(self) -> dict:
         now_ms = int(time.time() * 1000)
