@@ -1,0 +1,14 @@
+[Unit]
+Description=Optional final-demo aircraft Wi-Fi network
+After=NetworkManager.service
+Wants=NetworkManager.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+EnvironmentFile=/etc/low-altitude-iot/rdk-network.env
+ExecStart=/usr/local/lib/low-altitude-iot/configure_rdk_network.sh --mode demo --persist
+ExecStop=/usr/bin/nmcli connection down low-altitude-aircraft
+
+[Install]
+WantedBy=multi-user.target
