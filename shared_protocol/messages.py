@@ -5,6 +5,9 @@ import math
 from .frame import MessageType
 
 
+MAX_MISSION_ITEMS = 100
+
+
 def _object(payload, required, optional=()):
     if not isinstance(payload, dict):
         raise TypeError("payload must be an object")
@@ -56,12 +59,16 @@ def validate_payload(message_type, payload):
         _object(payload, ("mission_id", "item_count", "vehicle"))
         _string(payload["mission_id"], "mission_id")
         _uint32(payload["item_count"], "item_count")
+        if payload["item_count"] > MAX_MISSION_ITEMS:
+            raise ValueError("item_count exceeds mission limit")
         if payload["vehicle"] not in ("aircraft", "rover"):
             raise ValueError("vehicle must be aircraft or rover")
     elif message_type is MessageType.MISSION_ITEM:
         _object(payload, ("mission_id", "index", "lat", "lon", "alt"))
         _string(payload["mission_id"], "mission_id")
         _uint32(payload["index"], "index")
+        if payload["index"] >= MAX_MISSION_ITEMS:
+            raise ValueError("index exceeds mission limit")
         _number(payload["lat"], "lat", -90.0, 90.0)
         _number(payload["lon"], "lon", -180.0, 180.0)
         _number(payload["alt"], "alt")
@@ -69,6 +76,8 @@ def validate_payload(message_type, payload):
         _object(payload, ("mission_id", "item_count"))
         _string(payload["mission_id"], "mission_id")
         _uint32(payload["item_count"], "item_count")
+        if payload["item_count"] > MAX_MISSION_ITEMS:
+            raise ValueError("item_count exceeds mission limit")
     elif message_type is MessageType.ACK:
         _object(payload, ("acked_sequence",))
         _uint32(payload["acked_sequence"], "acked_sequence")

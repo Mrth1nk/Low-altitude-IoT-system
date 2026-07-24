@@ -5,6 +5,7 @@ import uuid
 import zlib
 
 from shared_protocol.frame import (
+    DEFAULT_MAX_PAYLOAD_LENGTH,
     MAGIC,
     VERSION,
     Frame,
@@ -115,6 +116,31 @@ class FrameTests(unittest.TestCase):
 
         self.assertEqual(decoded, [valid])
 
+    def test_encoder_enforces_default_and_configurable_payload_limit(self):
+        oversized = Frame(
+            MessageType.STATUS,
+            0,
+            14,
+            self.command_id,
+            {"state": "ready", "detail": "x" * DEFAULT_MAX_PAYLOAD_LENGTH},
+        )
+        small = Frame(
+            MessageType.STATUS,
+            0,
+            15,
+            self.command_id,
+            {"state": "ready", "detail": "12345"},
+        )
+
+        with self.assertRaises(FrameError):
+            encode_frame(oversized)
+        with self.assertRaises(FrameError):
+            encode_frame(small, max_payload_length=10)
+        self.assertEqual(
+            decode_frame(encode_frame(small, max_payload_length=128)),
+            small,
+        )
+
 
 class TypedPayloadTests(unittest.TestCase):
     def test_accepts_all_required_message_payloads(self):
@@ -175,6 +201,33 @@ class TypedPayloadTests(unittest.TestCase):
                 (TypeError, ValueError)
             ):
                 validate_payload(message_type, payload)
+
+    def test_rejects_missions_larger_than_operational_limit(self):
+        with self.assertRaises(ValueError):
+            validate_payload(
+                MessageType.MISSION_BEGIN,
+                {
+                    "mission_id": "too-large",
+                    "item_count": 101,
+                    "vehicle": "aircraft",
+                },
+            )
+        with self.assertRaises(ValueError):
+            validate_payload(
+                MessageType.MISSION_COMMIT,
+                {"mission_id": "too-large", "item_count": 101},
+            )
+        with self.assertRaises(ValueError):
+            validate_payload(
+                MessageType.MISSION_ITEM,
+                {
+                    "mission_id": "too-large",
+                    "index": 100,
+                    "lat": 0.0,
+                    "lon": 0.0,
+                    "alt": 1.0,
+                },
+            )
 
     def test_frame_encoding_validates_payload_and_json_serializability(self):
         with self.assertRaises(ValueError):

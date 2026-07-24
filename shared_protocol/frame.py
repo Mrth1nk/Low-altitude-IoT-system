@@ -68,10 +68,14 @@ def _canonical_payload(message_type, payload):
         raise ValueError("payload is not valid JSON") from exc
 
 
-def encode_frame(frame):
+def encode_frame(frame, max_payload_length=DEFAULT_MAX_PAYLOAD_LENGTH):
     if not isinstance(frame, Frame):
         raise TypeError("frame must be a Frame")
+    if max_payload_length < 0:
+        raise ValueError("max_payload_length must be non-negative")
     payload = _canonical_payload(frame.message_type, frame.payload)
+    if len(payload) > max_payload_length:
+        raise FrameError("payload length exceeds limit")
     header = HEADER.pack(
         MAGIC,
         VERSION,
