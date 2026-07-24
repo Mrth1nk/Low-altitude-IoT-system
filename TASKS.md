@@ -1,5 +1,54 @@
 # TASKS.md
 
+## 2026-07-24 Refactor Status
+
+### Completed
+
+- Imported the proven RDK, Tuya cloud ground station, ELF bridge, and infrared
+  vision baseline without committing credentials or runtime state.
+- Added the authenticated LIOT v1 protocol with bounded retry, replay
+  protection, restart-safe counters, command IDs, mission checksums, and
+  split/concatenated stream recovery.
+- Preserved the working L610/Tuya route while separating Rover commands from
+  aircraft commands.
+- Replaced Rover point-by-point goto handling with an asynchronous, verified
+  MAVLink mission transaction:
+  - request-driven `MISSION_ITEM_INT` upload;
+  - accepted ACK validation;
+  - mission download and field-by-field readback;
+  - indoor upload verification without fake GPS or Home;
+  - real GPS/Home/EKF execution gate before AUTO;
+  - bounded queue, stale-command rejection, and confirmed failure cleanup.
+- Added the ELF durable command inbox and optical gate:
+  - `/dev/ttyUSB0` serial-stream framing for the transparent Wi-Fi telemetry
+    module;
+  - atomic replace plus file and directory fsync before ACK;
+  - restart recovery, duplicate suppression, missing-item resume, and bounded
+    storage;
+  - one active command plus a bounded FIFO;
+  - `LINK_BLOCKED`-only output and command rejection while the beacon is lost;
+  - one-hertz aircraft state while the optical link is locked.
+- Verified the current repository with 139 Python tests, `compileall`, and
+  `git diff --check`.
+
+### In Progress
+
+- Building the single-owner ELF MAVLink session and verified aircraft mission
+  worker for `/dev/ttyACM0`.
+
+### Remaining
+
+1. Rebuild and replay-test GUIDED infrared tracking.
+2. Rebuild precision landing with the configured forward camera orientation
+   and 0.04 m forward / 0.01 m right camera displacement.
+3. Build deterministic ELF and RDK systemd services and reversible installers.
+4. Finish the Tuya-only dual-vehicle ground station mission workflow.
+5. Add ArduPilot parameter backup/audit tooling without changing parameters by
+   default.
+6. Run fault injection, propeller-off hardware integration, outdoor Rover
+   mission verification, and staged flight tests.
+7. Push the verified branch to `Mrth1nk/Low-altitude-IoT-system`.
+
 ## Done
 
 - Built RDK-side rover agent under `uav_tuya_agent/`.

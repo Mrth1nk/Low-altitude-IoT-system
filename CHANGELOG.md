@@ -1,5 +1,25 @@
 # CHANGELOG.md
 
+## 2026-07-24
+
+- Started the reliable dual-vehicle refactor on
+  `refactor/reliable-system`.
+- Added the LIOT v1 framed protocol and typed Rover/aircraft command routing.
+- Added HMAC authentication, replay protection, restart-safe session state, and
+  a challenge exchange for the RDK-to-ELF link.
+- Replaced Rover goto queuing with asynchronous MAVLink mission upload,
+  accepted-ACK validation, download/readback verification, and real navigation
+  readiness gates.
+- Added an ELF durable inbox for complete aircraft mission staging before any
+  flight-controller handshake begins.
+- Added serial-stream handling for the real `woshinailong` topology: RDK UDP to
+  the Wi-Fi telemetry module, then transparent bytes on ELF `/dev/ttyUSB0`.
+- Added strict optical-link behavior: cloud aircraft commands are rejected and
+  only timestamped `LINK_BLOCKED` crosses the link while the infrared target is
+  lost.
+- Kept production RDK and ELF services unchanged while the replacement stack is
+  under test.
+
 ## 2026-07-23
 
 - Added project maintenance documentation:
