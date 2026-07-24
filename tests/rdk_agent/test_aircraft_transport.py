@@ -481,6 +481,7 @@ class StartupImportTests(unittest.TestCase):
         env = dict(os.environ)
         env["DRY_RUN"] = "1"
         env["REPO_ROOT"] = str(repo)
+        env["AIRCRAFT_LINK_PSK"] = "dry-run-test-key-1234"
 
         result = subprocess.run(
             ["bash", "rdk_agent/install_rdk_boot_services.sh"],
@@ -501,6 +502,159 @@ class StartupImportTests(unittest.TestCase):
         self.assertIn("backup existing units/scripts", result.stdout)
         self.assertIn("health-check services", result.stdout)
         self.assertIn("rollback on failure", result.stdout)
+        self.assertIn(
+            "EnvironmentFile=/etc/low-altitude-iot/rdk.env",
+            result.stdout,
+        )
+        self.assertIn("AIRCRAFT_LINK_PSK=<redacted>", result.stdout)
+        self.assertNotIn(env["AIRCRAFT_LINK_PSK"], result.stdout)
+
+    def test_rdk_installer_rejects_missing_or_short_psk_before_replacement(self):
+        repo = Path(__file__).resolve().parents[2]
+        for value in (
+            "",
+            "too-short",
+            "REPLACE_WITH_UNTRACKED_RANDOM_VALUE",
+            "valid-length-key-123\nINJECTED=value",
+        ):
+            env = dict(os.environ)
+            env.update(
+                {
+                    "DRY_RUN": "1",
+                    "REPO_ROOT": str(repo),
+                    "AIRCRAFT_LINK_PSK": value,
+                    "RDK_ENV_FILE": "/does/not/exist",
+                }
+            )
+            result = subprocess.run(
+                ["bash", "rdk_agent/install_rdk_boot_services.sh"],
+                cwd=repo,
+                env=env,
+                text=True,
+                capture_output=True,
+                timeout=5,
+            )
+
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("AIRCRAFT_LINK_PSK", result.stderr)
+            self.assertNotIn("backup existing units/scripts", result.stdout)
+
+    def test_rdk_installer_writes_root_only_psk_file_without_printing_secret(self):
+        repo = Path(__file__).resolve().parents[2]
+        secret = "provisioned-test-key-123456"
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            bin_dir = root / "bin"
+            install_root = root / "root"
+            bin_dir.mkdir()
+            (install_root / "usr/local/sbin").mkdir(parents=True)
+            (install_root / "etc/systemd/system").mkdir(parents=True)
+            command_log = root / "commands.log"
+            scripts = {
+                "sudo": '#!/bin/sh\nexec "$@"\n',
+                "ip": '#!/bin/sh\nexit 0\n',
+                "chown": (
+                    '#!/bin/sh\n'
+                    f'echo "chown $*" >> "{command_log}"\n'
+                    'exit 0\n'
+                ),
+                "systemctl": (
+                    '#!/bin/sh\n'
+                    f'echo "systemctl $*" >> "{command_log}"\n'
+                    'case "$1" in is-enabled|is-active) exit 0 ;; esac\n'
+                    'exit 0\n'
+                ),
+            }
+            for name, content in scripts.items():
+                path = bin_dir / name
+                path.write_text(content)
+                path.chmod(0o755)
+            env = dict(os.environ)
+            env.update(
+                {
+                    "PATH": f"{bin_dir}:{env['PATH']}",
+                    "REPO_ROOT": str(repo),
+                    "INSTALL_ROOT": str(install_root),
+                    "PYTHON_BIN": os.environ.get("PYTHON", "python3"),
+                    "AIRCRAFT_LINK_PSK": secret,
+                }
+            )
+            result = subprocess.run(
+                ["bash", "rdk_agent/install_rdk_boot_services.sh"],
+                cwd=repo,
+                env=env,
+                text=True,
+                capture_output=True,
+                timeout=10,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            env_file = install_root / "etc/low-altitude-iot/rdk.env"
+            self.assertEqual(env_file.stat().st_mode & 0o777, 0o600)
+            self.assertEqual(
+                env_file.read_text(),
+                f"AIRCRAFT_LINK_PSK={secret}\n",
+            )
+            self.assertNotIn(secret, result.stdout)
+            self.assertNotIn(secret, result.stderr)
+            self.assertIn(
+                f"chown root:root {env_file}", command_log.read_text()
+            )
+
+    def test_rdk_installer_failed_health_restores_mengchuang_unit_state(self):
+        repo = Path(__file__).resolve().parents[2]
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            bin_dir = root / "bin"
+            install_root = root / "root"
+            bin_dir.mkdir()
+            (install_root / "usr/local/sbin").mkdir(parents=True)
+            (install_root / "etc/systemd/system").mkdir(parents=True)
+            command_log = root / "commands.log"
+            scripts = {
+                "sudo": '#!/bin/sh\nexec "$@"\n',
+                "ip": '#!/bin/sh\nexit 0\n',
+                "systemctl": (
+                    '#!/bin/sh\n'
+                    f'echo "systemctl $*" >> "{command_log}"\n'
+                    'if [ "$1" = "is-enabled" ] && [ "$3" = "uav-mengchuang-link.service" ]; then exit 0; fi\n'
+                    'if [ "$1" = "is-active" ] && [ "$3" = "uav-mengchuang-link.service" ]; then exit 0; fi\n'
+                    'if [ "$1" = "is-enabled" ] || [ "$1" = "is-active" ]; then exit 1; fi\n'
+                    'exit 0\n'
+                ),
+            }
+            for name, content in scripts.items():
+                path = bin_dir / name
+                path.write_text(content)
+                path.chmod(0o755)
+            env = dict(os.environ)
+            env.update(
+                {
+                    "PATH": f"{bin_dir}:{env['PATH']}",
+                    "REPO_ROOT": str(repo),
+                    "INSTALL_ROOT": str(install_root),
+                    "PYTHON_BIN": os.environ.get("PYTHON", "python3"),
+                    "AIRCRAFT_LINK_PSK": "rollback-test-key-123456",
+                }
+            )
+            result = subprocess.run(
+                ["bash", "rdk_agent/install_rdk_boot_services.sh"],
+                cwd=repo,
+                env=env,
+                text=True,
+                capture_output=True,
+                timeout=10,
+            )
+
+            self.assertNotEqual(result.returncode, 0)
+            commands = command_log.read_text()
+            self.assertIn(
+                "systemctl enable uav-mengchuang-link.service", commands
+            )
+            self.assertIn(
+                "systemctl restart uav-mengchuang-link.service", commands
+            )
+            self.assertIn("previous RDK services restored", result.stderr)
 
     def test_start_fails_clearly_when_shared_protocol_is_missing(self):
         repo = Path(__file__).resolve().parents[2]
