@@ -28,26 +28,38 @@
   - one active command plus a bounded FIFO;
   - `LINK_BLOCKED`-only output and command rejection while the beacon is lost;
   - one-hertz aircraft state while the optical link is locked.
-- Verified the current repository with 139 Python tests, `compileall`, and
+- Added single-owner ELF MAVLink handling, verified aircraft mission upload
+  and readback, isolated GUIDED tracking, and angle-only precision landing.
+- Deployed the replacement ELF services and verified the real camera, flight
+  controller, telemetry serial device, display manager, and atomic snapshots.
+- Deployed the replacement RDK service without changing the development Wi-Fi:
+  - L610 remains the Tuya/default route;
+  - the old Rover service is disabled transactionally;
+  - the Tuya agent is the sole owner of aircraft UDP ports;
+  - MQTT property reports return Tuya `code: 0`.
+- Finished the Tuya-only dual-vehicle ground station with complete Rover and
+  aircraft missions, separate aircraft AUTO, optical blocking, fixed message
+  timestamps, mission timelines, alerts, and responsive layout.
+- Added read-only ArduPilot parameter backup/audit tools. No flight-controller
+  parameter change is currently required; `PLND_EST_TYPE=0` is preserved.
+- Added deterministic fault-injection integration tests and a read-only demo
+  preflight/runbook.
+- Verified the current repository with 210 Python tests (`1` OpenCV-dependent
+  skip), 10 Node tests, syntax checks, browser layout checks, and
   `git diff --check`.
 
 ### In Progress
 
-- Building the single-owner ELF MAVLink session and verified aircraft mission
-  worker for `/dev/ttyACM0`.
+- Preparing the final RDK `woshinailong` boot profile and end-to-end optical
+  link rehearsal without disrupting the current SSH development connection.
 
 ### Remaining
 
-1. Rebuild and replay-test GUIDED infrared tracking.
-2. Rebuild precision landing with the configured forward camera orientation
-   and 0.04 m forward / 0.01 m right camera displacement.
-3. Build deterministic ELF and RDK systemd services and reversible installers.
-4. Finish the Tuya-only dual-vehicle ground station mission workflow.
-5. Add ArduPilot parameter backup/audit tooling without changing parameters by
-   default.
-6. Run fault injection, propeller-off hardware integration, outdoor Rover
-   mission verification, and staged flight tests.
-7. Push the verified branch to `Mrth1nk/Low-altitude-IoT-system`.
+1. Activate the prepared `woshinailong` profile for the final demo and run both
+   role-specific preflight checks.
+2. Run the supervised propeller-off optical-lock and aircraft command rehearsal.
+3. Run outdoor Rover GPS mission verification and staged flight tests.
+4. Push the verified branch to `Mrth1nk/Low-altitude-IoT-system`.
 
 ## Done
 
@@ -95,9 +107,9 @@
 
 ## In Progress
 
-- Stabilizing the final demo mode where RDK `wlan0` switches from the phone hotspot to `mengchuang` while L610 remains the cloud/default route.
-- Validating final demo sequence where RDK Wi-Fi connects to `mengchuang`, receives aircraft telemetry, and sends MAVLink2 aircraft commands.
-- Aircraft mission upload still needs flight-controller-side confirmation: current logs show RDK sends mission upload attempts, but the FC does not return `MISSION_REQUEST_INT` through the bridge during the tested window.
+- Final physical rehearsal of the prepared `woshinailong` link. Aircraft
+  mission upload and flight-controller readback have already been verified on
+  the real ELF/ArduPilot connection without entering AUTO.
 
 ## Next Steps
 
@@ -154,19 +166,5 @@
 
 ## Deferred
 
-- Task 5 / ELF authenticated LIOT integration: the RDK transport now requires
-  HMAC-authenticated datagrams, but cross-restart session challenge and ELF codec
-  compatibility are not complete. Before deploying this revision to the production
-  RDK or live aircraft link, update the ELF bridge to use
-  `shared_protocol.auth.AuthenticatedDatagramCodec` with the same untracked
-  `AIRCRAFT_LINK_PSK` and complete the restart handshake design.
-- Task 11: ground-station full-mission editor and OpenAPI mission payload/filtering.
-  The runtime accepts normalized complete mission payloads, but this task deliberately
-  does not change either ground-station implementation or its per-point UI.
-- Local macOS system Python 3.9 does not include `paho-mqtt`; pure root tests stay
-  isolated from that optional import. Run the Tuya authentication baseline in the
-  RDK virtual environment, where the dependency is installed.
-- Improve RDK README IP examples from old `192.168.43.175` to current development hotspot IP pattern.
-- Add a one-command health report script for RDK network, L610, Tuya MQTT, rover FC, and aircraft gateway.
-- Add browser-side indicator that explicitly shows whether aircraft command downlink is blocked because `aircraft_state.json` is stale.
-- Add safer final-demo runbook with numbered operator steps.
+- Outdoor navigation and powered flight validation remain supervised field
+  activities; software checks do not replace the physical safety checklist.

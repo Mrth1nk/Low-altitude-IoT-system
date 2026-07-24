@@ -17,8 +17,28 @@
 - Added strict optical-link behavior: cloud aircraft commands are rejected and
   only timestamped `LINK_BLOCKED` crosses the link while the infrared target is
   lost.
-- Kept production RDK and ELF services unchanged while the replacement stack is
-  under test.
+- Added a single-reader ELF MAVLink session and transactional aircraft mission
+  upload with Home handling, request/ACK negotiation, strict readback, indoor
+  verification, cleanup, and an explicit execution-readiness gate.
+- Rebuilt GUIDED infrared tracking and precision landing as isolated vision
+  services using the real forward-facing camera and configured camera offset.
+- Installed and verified the replacement ELF services while preserving the
+  desktop and root-directory permissions.
+- Added reversible RDK installers, root-only runtime secrets, SSH-friendly
+  development networking, and an optional final-demo Wi-Fi service.
+- Migrated the production RDK agent while keeping the L610 ECM interface as the
+  Tuya/default route; Tuya property reports were confirmed with `code: 0`.
+- Removed duplicate ownership of aircraft UDP ports between the RDK cloud agent
+  and local debug server.
+- Added read-only ArduPilot parameter backup/audit tooling and documented that
+  no parameter write is currently required.
+- Added protocol fault injection, durable restart tests, fake flight-controller
+  mission verification, and a read-only competition preflight/runbook.
+- Rebuilt the operator ground station around Tuya Cloud OpenAPI with dual
+  vehicle missions, route queues, aircraft altitude, separate AUTO, optical
+  command blocking, alerts, fixed message timestamps, and responsive layout.
+- Fixed CSS hidden-state handling after browser validation found a false
+  `OPTICAL LINK BLOCKED` banner.
 
 ## 2026-07-23
 
