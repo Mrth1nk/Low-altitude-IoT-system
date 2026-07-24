@@ -10,6 +10,7 @@
   --amber: #b25d08;
 }
 * { box-sizing: border-box; }
+[hidden] { display: none !important; }
 body {
   margin: 0;
   color: var(--ink);

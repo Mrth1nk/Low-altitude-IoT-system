@@ -2,6 +2,8 @@
 
 const test = require("node:test");
 const assert = require("node:assert/strict");
+const fs = require("node:fs");
+const path = require("node:path");
 
 const {
   appendAircraftMessages,
@@ -9,6 +11,14 @@ const {
   normalizeCloudState,
   transactionTimeline,
 } = require("../public/core.js");
+
+test("hidden UI states cannot be overridden by component display rules", () => {
+  const css = fs.readFileSync(
+    path.join(__dirname, "../public/style.css"),
+    "utf8",
+  );
+  assert.match(css, /\[hidden\]\s*\{\s*display:\s*none\s*!important;\s*\}/);
+});
 
 test("normalizes rover_state while preserving filtered raw properties", () => {
   const state = normalizeCloudState([
