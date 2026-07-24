@@ -1,6 +1,7 @@
 """Typed cloud command normalization and vehicle-isolated routing."""
 
 from dataclasses import dataclass
+import json
 import time
 import uuid
 
@@ -46,6 +47,16 @@ class CloudCommand:
         del source  # The normalized shape intentionally contains no credentials.
         clock = clock or time.time
         data = _flatten(raw)
+        raw_command = data.get("command", data.get("action", data.get("last_command")))
+        if isinstance(raw_command, str) and raw_command.lstrip().startswith("{"):
+            try:
+                envelope = json.loads(raw_command)
+            except json.JSONDecodeError:
+                envelope = None
+            if isinstance(envelope, dict):
+                merged = dict(envelope)
+                merged.update({key: value for key, value in data.items() if key != "command"})
+                data = merged
         nested = data.get("payload")
         payload = dict(nested) if isinstance(nested, dict) else {}
         raw_action = str(
@@ -53,13 +64,16 @@ class CloudCommand:
             or "noop"
         ).strip().lower()
         explicit_target = str(data.get("target", "") or "").strip().lower()
-        if raw_action.startswith("aircraft_"):
+        if raw_action in ("network_phone", "network_aircraft"):
+            target, action = "system", "network_mode"
+            payload["mode"] = raw_action[len("network_") :]
+        elif raw_action.startswith("aircraft_"):
             target, action = "aircraft", raw_action[len("aircraft_") :]
         else:
             target = explicit_target or "rover"
             action = raw_action
-        if target not in ("rover", "aircraft"):
-            raise ValueError("target must be rover or aircraft")
+        if target not in ("rover", "aircraft", "system"):
+            raise ValueError("target must be rover, aircraft, or system")
         if not action:
             raise ValueError("action must not be empty")
 
@@ -90,6 +104,7 @@ class CommandRouter:
         rover_executor,
         aircraft_link,
         optical_state,
+        system_executor=None,
         clock=None,
         max_age_seconds=10.0,
     ):
@@ -97,6 +112,7 @@ class CommandRouter:
             raise ValueError("max_age_seconds must be positive")
         self.rover_executor = rover_executor
         self.aircraft_link = aircraft_link
+        self.system_executor = system_executor
         self.optical_state = optical_state
         self.clock = clock or time.time
         self.max_age_seconds = float(max_age_seconds)
@@ -113,6 +129,10 @@ class CommandRouter:
             if str(self.optical_state()).strip().lower() != "locked":
                 raise CommandRejected("aircraft command rejected: optical link blocked")
             return self.aircraft_link.execute(command)
+        if command.target == "system":
+            if self.system_executor is None:
+                raise CommandRejected("system commands are disabled")
+            return self.system_executor.execute(command)
         return self.rover_executor.execute(command)
 
 

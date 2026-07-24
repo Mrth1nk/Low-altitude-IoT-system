@@ -120,6 +120,27 @@ class AircraftTransportTests(unittest.TestCase):
         self.assertEqual(response.payload["challenge"], "ab" * 32)
         self.assertEqual(sender, self.transport.local_address)
 
+    def test_reassembles_authenticated_serial_stream_split_across_udp_packets(self):
+        frame = Frame(
+            MessageType.STATUS,
+            0,
+            402,
+            uuid.UUID(int=0),
+            {"state": "locked", "detail": "serial_stream_reassembled"},
+        )
+        envelope = self.peer_auth.seal(encode_frame(frame))
+        split = len(envelope) // 2
+        self.peer.sendto(b"tail-of-previous-frame" + envelope[:split], self.transport.local_address)
+        self.peer.sendto(envelope[split:], self.transport.local_address)
+        time.sleep(0.005)
+
+        self.transport.pump(now=0.0)
+
+        self.assertEqual(self.transport.optical_state(), "locked")
+        self.assertEqual(
+            self.transport.status()["link_detail"], "serial_stream_reassembled"
+        )
+
     def test_rdk_auth_counter_and_nonce_survive_transport_restart(self):
         with tempfile.TemporaryDirectory() as tmp:
             store = AtomicJsonStore(Path(tmp) / "rdk-auth.json")

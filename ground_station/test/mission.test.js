@@ -73,23 +73,20 @@ test("rejects invalid or oversized mission input before command creation", () =>
   );
 });
 
-test("server property filter preserves command envelope but drops unknown properties", () => {
+test("server property filter emits only Tuya product DPs for simple commands", () => {
   const filtered = filterCommandProperties({
-    command: "mission",
+    command: "manual",
     target: "rover",
     command_id: "00112233-4455-4677-8899-aabbccddeeff",
     source_timestamp: 1710000000000,
-    payload: {mission_id: "m1", items: []},
     target_lat: 32,
+    steering: 10,
     unknown: "must-not-leave-server",
   });
 
   assert.deepEqual(Object.keys(filtered).sort(), [
     "command",
-    "command_id",
-    "payload",
-    "source_timestamp",
-    "target",
+    "steering",
     "target_lat",
   ]);
 });
@@ -101,4 +98,33 @@ test("command filtering identifies every aircraft command including full mission
     true,
   );
   assert.equal(isAircraftCommand({command: "mission", target: "rover"}), false);
+});
+
+test("server property filter preserves hidden network mode commands", () => {
+  assert.deepEqual(
+    filterCommandProperties({
+      command: "network_phone",
+      source_timestamp: 1710000000000,
+    }),
+    {
+      command: "network_phone",
+    },
+  );
+});
+
+test("server packs a mission envelope into the existing command string DP", () => {
+  const properties = filterCommandProperties({
+    command: "aircraft_mission",
+    target: "aircraft",
+    command_id: "00112233-4455-4677-8899-aabbccddeeff",
+    source_timestamp: 1710000000000,
+    payload: {mission_id: "m1", items: [{lat: 32.1, lng: 118.9, alt: 20}]},
+  });
+
+  assert.deepEqual(Object.keys(properties), ["command"]);
+  assert.deepEqual(JSON.parse(properties.command), {
+    command: "aircraft_mission",
+    command_id: "00112233-4455-4677-8899-aabbccddeeff",
+    payload: {mission_id: "m1", items: [{lat: 32.1, lng: 118.9, alt: 20}]},
+  });
 });

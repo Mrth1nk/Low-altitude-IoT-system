@@ -242,13 +242,19 @@
   function filterCommandProperties(command) {
     const result = {};
     if (!command || typeof command !== "object") return result;
-    for (const [code, value] of Object.entries(command)) {
-      if (
-        COMMAND_PROPERTY_CODES.has(code)
-        && value !== undefined
-        && value !== null
-        && value !== ""
-      ) result[code] = value;
+    const hasEnvelope = command.payload && typeof command.payload === "object";
+    if (hasEnvelope) {
+      const envelope = {
+        command: command.command || command.action || "",
+        ...(command.command_id ? {command_id: command.command_id} : {}),
+        payload: command.payload,
+      };
+      result.command = JSON.stringify(envelope);
+      return result;
+    }
+    for (const code of ["command", "target_lat", "target_lng", "target_speed", "steering", "throttle"]) {
+      const value = command[code];
+      if (value !== undefined && value !== null && value !== "") result[code] = value;
     }
     return result;
   }

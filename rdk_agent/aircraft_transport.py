@@ -7,6 +7,7 @@ import uuid
 from shared_protocol.auth import (
     AuthError,
     AuthenticatedDatagramCodec,
+    AuthenticatedStreamDecoder,
     PersistentAuthSession,
 )
 from shared_protocol.frame import (
@@ -77,6 +78,12 @@ class AircraftTransport:
         self._transport_revision = 0
         self._remote_stage = ""
         self._remote_detail = ""
+        self._rx_packets = 0
+        self._rx_wrong_peer = 0
+        self._rx_auth_errors = 0
+        self._rx_frame_errors = 0
+        self._last_remote = ""
+        self._decoder = AuthenticatedStreamDecoder()
         self._socket = self._create_socket()
 
     @property
@@ -106,6 +113,11 @@ class AircraftTransport:
                 f"{self._peer[0]}:{self._peer[1]}" if self._peer else ""
             ),
             "transport_error": self._transport_error,
+            "rx_packets": self._rx_packets,
+            "rx_wrong_peer": self._rx_wrong_peer,
+            "rx_auth_errors": self._rx_auth_errors,
+            "rx_frame_errors": self._rx_frame_errors,
+            "last_remote": self._last_remote,
             "locked_age": (
                 round(max(0.0, self._clock() - self._last_locked_at), 3)
                 if self._last_locked_at is not None
@@ -157,60 +169,72 @@ class AircraftTransport:
             except OSError as exc:
                 self._schedule_reopen(now, f"udp receive failed: {exc}")
                 return
+            self._rx_packets += 1
+            self._last_remote = f"{remote[0]}:{remote[1]}"
             if (str(remote[0]), int(remote[1])) != self._peer:
+                self._rx_wrong_peer += 1
                 continue
+            for envelope in self._decoder.feed(data):
+                self._process_envelope(envelope, now)
+
+    def _process_envelope(self, envelope, now):
+        try:
+            data = self._open(envelope)
+        except AuthError:
+            self._rx_auth_errors += 1
+            return
+        try:
+            frame = decode_frame(data)
+        except FrameError:
+            self._rx_frame_errors += 1
+            return
+        self._process_frame(frame, now)
+
+    def _process_frame(self, frame, now):
+        if frame.message_type is MessageType.AUTH_CHALLENGE:
+            response = Frame(
+                MessageType.AUTH_RESPONSE,
+                0,
+                frame.sequence,
+                uuid.UUID(int=0),
+                {"challenge": frame.payload["challenge"]},
+            )
             try:
-                data = self._open(data)
-            except AuthError:
-                continue
-            try:
-                frame = decode_frame(data)
-            except FrameError:
-                continue
-            if frame.message_type is MessageType.AUTH_CHALLENGE:
-                response = Frame(
-                    MessageType.AUTH_RESPONSE,
-                    0,
-                    frame.sequence,
-                    uuid.UUID(int=0),
-                    {"challenge": frame.payload["challenge"]},
+                self._socket.sendto(
+                    self._seal(encode_frame(response)), self._peer
                 )
-                try:
-                    self._socket.sendto(
-                        self._seal(encode_frame(response)), self._peer
-                    )
-                except OSError as exc:
-                    self._schedule_reopen(
-                        now, f"challenge response failed: {exc}"
-                    )
-                    return
-            elif frame.message_type in (MessageType.ACK, MessageType.NACK):
-                self.aircraft_link.accept_response(frame)
-            elif frame.message_type is MessageType.LINK_BLOCKED:
-                self._block(str(frame.payload["reason"])[:80])
-            elif frame.message_type is MessageType.STATUS:
-                state = str(frame.payload["state"]).strip().lower()
-                detail = str(
-                    frame.payload.get("detail", frame.payload["state"])
-                )[:80]
-                if state in ("locked", "ready", "online"):
-                    self._optical_state = "locked"
-                    self._link_detail = detail
-                    self._last_locked_at = now
-                elif state.upper() in (
-                    "MISSION_STAGED",
-                    "VERIFIED",
-                    "COMPLETED",
-                    "FAILED",
-                    "UNSAFE_RESIDUAL",
-                ):
-                    self._remote_stage = state.upper()
-                    self._remote_detail = str(
-                        frame.payload.get("detail", "")
-                    )[:256]
-                    self._transport_revision += 1
-                else:
-                    self._block(detail)
+            except OSError as exc:
+                self._schedule_reopen(
+                    now, f"challenge response failed: {exc}"
+                )
+                return
+        elif frame.message_type in (MessageType.ACK, MessageType.NACK):
+            self.aircraft_link.accept_response(frame)
+        elif frame.message_type is MessageType.LINK_BLOCKED:
+            self._block(str(frame.payload["reason"])[:80])
+        elif frame.message_type is MessageType.STATUS:
+            state = str(frame.payload["state"]).strip().lower()
+            detail = str(
+                frame.payload.get("detail", frame.payload["state"])
+            )[:80]
+            if state in ("locked", "ready", "online"):
+                self._optical_state = "locked"
+                self._link_detail = detail
+                self._last_locked_at = now
+            elif state.upper() in (
+                "MISSION_STAGED",
+                "VERIFIED",
+                "COMPLETED",
+                "FAILED",
+                "UNSAFE_RESIDUAL",
+            ):
+                self._remote_stage = state.upper()
+                self._remote_detail = str(
+                    frame.payload.get("detail", "")
+                )[:256]
+                self._transport_revision += 1
+            else:
+                self._block(detail)
 
     def _block(self, detail):
         self._optical_state = "blocked"

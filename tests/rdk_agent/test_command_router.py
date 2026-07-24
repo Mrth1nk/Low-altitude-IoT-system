@@ -20,10 +20,12 @@ class CommandRouterTests(unittest.TestCase):
         self.now = 1_800_000_000.0
         self.rover = RecordingExecutor()
         self.aircraft = RecordingExecutor()
+        self.system = RecordingExecutor()
         self.optical_state = "locked"
         self.router = CommandRouter(
             self.rover,
             self.aircraft,
+            system_executor=self.system,
             optical_state=lambda: self.optical_state,
             clock=lambda: self.now,
             max_age_seconds=10.0,
@@ -72,6 +74,57 @@ class CommandRouterTests(unittest.TestCase):
 
         self.assertEqual(self.rover.commands, [])
         self.assertEqual(self.aircraft.commands, [command])
+
+    def test_routes_network_mode_only_to_system_executor(self):
+        command = CloudCommand.from_cloud(
+            {
+                "target": "system",
+                "action": "network_mode",
+                "mode": "aircraft",
+                "source_timestamp": self.now,
+            }
+        )
+
+        result = self.router.route(command)
+
+        self.assertEqual(result["stage"], "routed")
+        self.assertEqual(self.system.commands, [command])
+        self.assertEqual(self.rover.commands, [])
+        self.assertEqual(self.aircraft.commands, [])
+
+    def test_normalizes_compact_network_alias_without_new_tuya_properties(self):
+        command = CloudCommand.from_cloud(
+            {
+                "command": "network_phone",
+                "source_timestamp": self.now,
+            }
+        )
+
+        self.assertEqual(command.target, "system")
+        self.assertEqual(command.action, "network_mode")
+        self.assertEqual(command.payload, {"mode": "phone"})
+
+    def test_decodes_command_envelope_carried_by_single_tuya_string_dp(self):
+        command = CloudCommand.from_cloud(
+            {
+                "command": json.dumps(
+                    {
+                        "command": "aircraft_mission",
+                        "command_id": "00112233-4455-6677-8899-aabbccddeeff",
+                        "payload": {
+                            "mission_id": "demo",
+                            "items": [{"lat": 32.1, "lng": 118.9, "alt": 20}],
+                        },
+                    }
+                ),
+                "source_timestamp": self.now,
+            }
+        )
+
+        self.assertEqual(command.target, "aircraft")
+        self.assertEqual(command.action, "mission")
+        self.assertEqual(command.payload["mission_id"], "demo")
+        self.assertEqual(len(command.payload["items"]), 1)
 
     def test_rejects_stale_command_before_any_executor(self):
         command = CloudCommand.from_cloud(

@@ -14,6 +14,7 @@ from aircraft_transport import AircraftTransport, legacy_gateway_ports
 from command_router import CloudCommand, CommandRejected, CommandRouter
 from l610 import check_l610, ensure_l610_usbnet, read_lte_rssi
 from mavlink_rover import RoverMavlink, discover_mavlink_urls
+from network_mode import NetworkModeExecutor
 from rover_state import (
     RoverCommand,
     RoverTelemetry,
@@ -47,6 +48,10 @@ def load_config(path: Path = CONFIG_PATH) -> dict:
     data.setdefault("at_port", "/dev/ttyUSB0")
     data.setdefault("state_path", str(STATE_PATH))
     data.setdefault("command_path", str(COMMAND_PATH))
+    data.setdefault(
+        "network_mode_request_path",
+        "/run/low-altitude-iot/network-mode",
+    )
     data.setdefault(
         "aircraft_auth_state_path",
         str(Path.home() / "uav_tuya_agent" / "aircraft_auth_state.json"),
@@ -110,7 +115,7 @@ def write_state(path: Path, telemetry: RoverTelemetry, connected: bool) -> None:
     path.write_text(json.dumps(doc, ensure_ascii=False, indent=2))
 
 
-def read_aircraft_summary(path: Path = AIRCRAFT_STATE_PATH) -> dict:
+def read_aircraft_summary(path: Path = AIRCRAFT_STATE_PATH, transport_status=None) -> dict:
     try:
         doc = json.loads(path.read_text(encoding="utf-8"))
     except Exception:
@@ -127,13 +132,20 @@ def read_aircraft_summary(path: Path = AIRCRAFT_STATE_PATH) -> dict:
     ]
     updated_at = float(doc.get("updated_at", 0) or 0)
     age = time.time() - updated_at if updated_at else None
-    link_active = bool(age is not None and age < 3)
+    transport_status = transport_status or {}
+    transport_locked = (
+        str(transport_status.get("optical_state", "")).lower() == "locked"
+    )
+    link_active = bool(transport_locked or (age is not None and age < 3))
     last_message = ""
     last_message_time = None
     if compact_messages:
         item = compact_messages[-1]
         last_message = f"{item.get('type', 'MSG')} {item.get('text', '')}"[:160]
         last_message_time = item.get("time")
+    if transport_locked and not compact_messages:
+        last_message = "STATUS aircraft link authenticated"
+        last_message_time = time.time()
     return {
         "aircraft": {
             "link_active": link_active,
@@ -142,12 +154,14 @@ def read_aircraft_summary(path: Path = AIRCRAFT_STATE_PATH) -> dict:
             "packets_received": int(doc.get("packets_received", 0) or 0),
             "bytes_received": int(doc.get("bytes_received", 0) or 0),
             "messages": compact_messages,
+            "optical_state": "locked" if transport_locked else "blocked",
         },
         "aircraft_link": link_active,
         "aircraft_age": round(age, 1) if age is not None else None,
         "aircraft_packets": int(doc.get("packets_received", 0) or 0),
         "aircraft_msg": last_message,
         "aircraft_msg_time": last_message_time,
+        "aircraft_optical_state": "locked" if transport_locked else "blocked",
     }
 
 
@@ -249,6 +263,7 @@ def run_agent(config: dict) -> int:
         RoverExecutor(),
         aircraft_link,
         optical_state=aircraft_transport.optical_state,
+        system_executor=NetworkModeExecutor(config["network_mode_request_path"]),
         max_age_seconds=float(config.get("command_max_age_sec", 10.0)),
     )
 
@@ -280,6 +295,7 @@ def run_agent(config: dict) -> int:
     client.loop_start()
 
     next_report = 0.0
+    last_aircraft_diagnostic = None
     report_interval = float(config["report_interval_sec"])
     next_lte = 0.0
     while True:
@@ -322,6 +338,17 @@ def run_agent(config: dict) -> int:
                 )
             transaction = aircraft_transport.pump(time.monotonic())
             telemetry.apply_aircraft_transaction(transaction)
+            diagnostic = aircraft_transport.status()
+            diagnostic_key = (
+                diagnostic.get("optical_state"),
+                diagnostic.get("rx_packets"),
+                diagnostic.get("rx_auth_errors"),
+                diagnostic.get("rx_frame_errors"),
+                diagnostic.get("last_remote"),
+            )
+            if diagnostic_key != last_aircraft_diagnostic:
+                print(f"aircraft transport {diagnostic}", flush=True)
+                last_aircraft_diagnostic = diagnostic_key
             for mission_status in rover.drain_mission_results():
                 receipt = apply_rover_mission_status(telemetry, mission_status)
                 print(
@@ -348,7 +375,11 @@ def run_agent(config: dict) -> int:
                 next_lte = now + 10
             write_state(state_path, telemetry, connected)
             if now >= next_report:
-                payload = telemetry.tuya_compact_payload(read_aircraft_summary())
+                payload = telemetry.tuya_compact_payload(
+                    read_aircraft_summary(
+                        transport_status=aircraft_transport.status()
+                    )
+                )
                 info = client.publish(report_topic, json.dumps(payload, separators=(",", ":")), qos=1)
                 next_report = now + report_interval
                 print(f"published {report_topic} rc={info.rc} msgId={payload['msgId']}", flush=True)
