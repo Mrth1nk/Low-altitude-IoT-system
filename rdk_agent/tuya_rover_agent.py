@@ -22,6 +22,7 @@ from rover_state import (
 )
 from rover_mission import MissionError
 from tuya_auth import build_tuya_credentials, make_topic
+from aircraft_agent.state_store import AtomicJsonStore
 
 CONFIG_PATH = Path.home() / "uav_tuya_agent" / "config.json"
 STATE_PATH = Path.home() / "uav_tuya_agent" / "runtime_state.json"
@@ -46,6 +47,10 @@ def load_config(path: Path = CONFIG_PATH) -> dict:
     data.setdefault("at_port", "/dev/ttyUSB0")
     data.setdefault("state_path", str(STATE_PATH))
     data.setdefault("command_path", str(COMMAND_PATH))
+    data.setdefault(
+        "aircraft_auth_state_path",
+        str(Path.home() / "uav_tuya_agent" / "aircraft_auth_state.json"),
+    )
     return data
 
 
@@ -207,6 +212,7 @@ def run_agent(config: dict) -> int:
         psk=config.get("aircraft_link_psk") or os.environ.get(
             "AIRCRAFT_LINK_PSK"
         ),
+        auth_store=AtomicJsonStore(config["aircraft_auth_state_path"]),
     )
 
     class RoverExecutor:

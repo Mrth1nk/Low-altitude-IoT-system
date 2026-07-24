@@ -122,11 +122,26 @@ def validate_payload(message_type, payload):
         _uint32(payload["acked_sequence"], "acked_sequence")
         _string(payload["reason"], "reason")
     elif message_type is MessageType.STATUS:
-        _object(payload, ("state",), ("detail",))
+        _object(payload, ("state",), ("detail", "timestamp"))
         _string(payload["state"], "state")
         if "detail" in payload:
             _string(payload["detail"], "detail", allow_empty=True)
+        if "timestamp" in payload:
+            _number(payload["timestamp"], "timestamp", 0.0)
     elif message_type is MessageType.LINK_BLOCKED:
-        _object(payload, ("reason",))
+        _object(payload, ("reason",), ("timestamp",))
         _string(payload["reason"], "reason")
+        if "timestamp" in payload:
+            _number(payload["timestamp"], "timestamp", 0.0)
+    elif message_type in (
+        MessageType.AUTH_CHALLENGE,
+        MessageType.AUTH_RESPONSE,
+    ):
+        _object(payload, ("challenge",))
+        _string(payload["challenge"], "challenge")
+        if (
+            len(payload["challenge"]) != 64
+            or any(char not in "0123456789abcdef" for char in payload["challenge"])
+        ):
+            raise ValueError("challenge must be 32-byte lowercase hex")
     return payload

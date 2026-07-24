@@ -12,6 +12,7 @@ from rdk_agent.aircraft_transport import AircraftTransport, legacy_gateway_ports
 from rdk_agent.command_router import CloudCommand, CommandRouter, RuntimeCommandAPI
 from shared_protocol.auth import AuthenticatedDatagramCodec
 from shared_protocol.frame import Frame, MessageType, decode_frame, encode_frame
+from aircraft_agent.state_store import AtomicJsonStore
 
 
 class AircraftTransportTests(unittest.TestCase):
@@ -100,6 +101,82 @@ class AircraftTransportTests(unittest.TestCase):
 
         self.assertEqual(self.link.pending_count, 0)
         self.assertEqual(self.transport.transaction_state()["stage"], "acknowledged")
+
+    def test_authenticated_challenge_is_answered_before_command_retry(self):
+        challenge = Frame(
+            MessageType.AUTH_CHALLENGE,
+            0,
+            400,
+            uuid.UUID(int=0),
+            {"challenge": "ab" * 32},
+        )
+        self.send_frame(challenge)
+        time.sleep(0.005)
+        self.transport.pump(now=0.0)
+
+        response, sender = self.receive_frame()
+
+        self.assertEqual(response.message_type, MessageType.AUTH_RESPONSE)
+        self.assertEqual(response.payload["challenge"], "ab" * 32)
+        self.assertEqual(sender, self.transport.local_address)
+
+    def test_rdk_auth_counter_and_nonce_survive_transport_restart(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = AtomicJsonStore(Path(tmp) / "rdk-auth.json")
+            peer_auth = AuthenticatedDatagramCodec(
+                self.key, session_nonce=b"Q" * 16
+            )
+            challenge = Frame(
+                MessageType.AUTH_CHALLENGE,
+                0,
+                401,
+                uuid.UUID(int=0),
+                {"challenge": "cd" * 32},
+            )
+            first = AircraftTransport(
+                AircraftLink(),
+                local_host="127.0.0.1",
+                local_port=0,
+                peer=self.peer.getsockname(),
+                psk=self.key,
+                auth_store=store,
+            )
+            try:
+                self.peer.sendto(
+                    peer_auth.seal(encode_frame(challenge)),
+                    first.local_address,
+                )
+                time.sleep(0.005)
+                first.pump(0.0)
+                packet, _ = self.peer.recvfrom(4096)
+                _payload, first_meta = peer_auth.open_with_metadata(packet)
+            finally:
+                first.close()
+
+            second = AircraftTransport(
+                AircraftLink(),
+                local_host="127.0.0.1",
+                local_port=0,
+                peer=self.peer.getsockname(),
+                psk=self.key,
+                auth_store=store,
+            )
+            try:
+                self.peer.sendto(
+                    peer_auth.seal(encode_frame(challenge)),
+                    second.local_address,
+                )
+                time.sleep(0.005)
+                second.pump(0.0)
+                packet, _ = self.peer.recvfrom(4096)
+                _payload, second_meta = peer_auth.open_with_metadata(packet)
+            finally:
+                second.close()
+
+            self.assertEqual(
+                first_meta["session_nonce"], second_meta["session_nonce"]
+            )
+            self.assertGreater(second_meta["counter"], first_meta["counter"])
 
     def test_mismatched_ack_does_not_clear_pending(self):
         self.send_status()

@@ -30,6 +30,8 @@ class MessageType(IntEnum):
     NACK = 6
     STATUS = 7
     LINK_BLOCKED = 8
+    AUTH_CHALLENGE = 9
+    AUTH_RESPONSE = 10
 
 
 @dataclass(frozen=True)

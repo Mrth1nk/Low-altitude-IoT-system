@@ -2,9 +2,20 @@
 
 import socket
 import time
+import uuid
 
-from shared_protocol.auth import AuthError, AuthenticatedDatagramCodec
-from shared_protocol.frame import FrameError, MessageType, decode_frame
+from shared_protocol.auth import (
+    AuthError,
+    AuthenticatedDatagramCodec,
+    PersistentAuthSession,
+)
+from shared_protocol.frame import (
+    Frame,
+    FrameError,
+    MessageType,
+    decode_frame,
+    encode_frame,
+)
 
 
 def legacy_gateway_ports(config, transport_port):
@@ -31,6 +42,7 @@ class AircraftTransport:
         status_timeout=3.0,
         retry_backoff=0.25,
         max_retry_backoff=4.0,
+        auth_store=None,
     ):
         if peer is None:
             raise ValueError("an exact aircraft peer is required")
@@ -42,7 +54,12 @@ class AircraftTransport:
             raise ValueError("invalid retry backoff")
         self.aircraft_link = aircraft_link
         self._peer = (str(peer[0]), int(peer[1]))
-        self._auth = AuthenticatedDatagramCodec(psk)
+        self._auth = (
+            PersistentAuthSession(psk, auth_store)
+            if auth_store is not None
+            else AuthenticatedDatagramCodec(psk)
+        )
+        self._persistent_auth = auth_store is not None
         self._local_host = str(local_host)
         self._local_port = int(local_port)
         self._socket_factory = socket_factory
@@ -121,7 +138,7 @@ class AircraftTransport:
             return self.transaction_state()
         try:
             for payload in self.aircraft_link.due_bytes(now):
-                self._socket.sendto(self._auth.seal(payload), self._peer)
+                self._socket.sendto(self._seal(payload), self._peer)
         except OSError as exc:
             self._schedule_reopen(now, f"udp send failed: {exc}")
         return self.transaction_state()
@@ -138,14 +155,31 @@ class AircraftTransport:
             if (str(remote[0]), int(remote[1])) != self._peer:
                 continue
             try:
-                data = self._auth.open(data)
+                data = self._open(data)
             except AuthError:
                 continue
             try:
                 frame = decode_frame(data)
             except FrameError:
                 continue
-            if frame.message_type in (MessageType.ACK, MessageType.NACK):
+            if frame.message_type is MessageType.AUTH_CHALLENGE:
+                response = Frame(
+                    MessageType.AUTH_RESPONSE,
+                    0,
+                    frame.sequence,
+                    uuid.UUID(int=0),
+                    {"challenge": frame.payload["challenge"]},
+                )
+                try:
+                    self._socket.sendto(
+                        self._seal(encode_frame(response)), self._peer
+                    )
+                except OSError as exc:
+                    self._schedule_reopen(
+                        now, f"challenge response failed: {exc}"
+                    )
+                    return
+            elif frame.message_type in (MessageType.ACK, MessageType.NACK):
                 self.aircraft_link.accept_response(frame)
             elif frame.message_type is MessageType.LINK_BLOCKED:
                 self._block(str(frame.payload["reason"])[:80])
@@ -167,6 +201,13 @@ class AircraftTransport:
         self.aircraft_link.fail_transaction(
             "link_blocked", self._link_detail
         )
+
+    def _seal(self, payload):
+        return self._auth.seal(payload)
+
+    def _open(self, datagram):
+        opened = self._auth.open(datagram)
+        return opened[0] if self._persistent_auth else opened
 
     def _expire_status(self, now):
         if (

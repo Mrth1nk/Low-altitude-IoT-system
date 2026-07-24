@@ -60,6 +60,33 @@ class AuthenticatedDatagramCodecTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             AuthenticatedDatagramCodec(self.key, session_nonce=b"short")
 
+    def test_snapshot_restores_send_counter_and_received_replay_window(self):
+        first = self.sender.seal(b"first")
+        self.receiver.open(first)
+        sender_state = self.sender.snapshot()
+        receiver_state = self.receiver.snapshot()
+
+        restarted_sender = AuthenticatedDatagramCodec(
+            self.key, state=sender_state
+        )
+        restarted_receiver = AuthenticatedDatagramCodec(
+            self.key, state=receiver_state
+        )
+        second = restarted_sender.seal(b"second")
+
+        self.assertEqual(restarted_receiver.open(second), b"second")
+        with self.assertRaises(ReplayError):
+            restarted_receiver.open(first)
+
+    def test_open_with_metadata_exposes_authenticated_session_identity(self):
+        datagram = self.sender.seal(b"payload")
+
+        payload, metadata = self.receiver.open_with_metadata(datagram)
+
+        self.assertEqual(payload, b"payload")
+        self.assertEqual(metadata["session_nonce"], b"A" * 16)
+        self.assertEqual(metadata["counter"], 0)
+
 
 if __name__ == "__main__":
     unittest.main()
