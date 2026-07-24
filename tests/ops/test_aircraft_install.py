@@ -283,6 +283,10 @@ class AircraftInstallerTests(unittest.TestCase):
             "atomic",
         ):
             self.assertIn(expected, output)
+        self.assertIn(
+            "source /etc/low-altitude-iot/aircraft.env",
+            HEALTH.read_text(),
+        )
 
 
 if __name__ == "__main__":

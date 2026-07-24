@@ -3,6 +3,12 @@ set -euo pipefail
 
 DRY_RUN=0
 [[ "${1:-}" == "--dry-run" ]] && DRY_RUN=1
+if ((!DRY_RUN)) && [[ -f /etc/low-altitude-iot/aircraft.env ]]; then
+  set -a
+  # Root-owned configuration supplies the actual by-id camera path.
+  source /etc/low-altitude-iot/aircraft.env
+  set +a
+fi
 RUNTIME_DIR="${AIRCRAFT_RUNTIME_DIR:-/run/low-altitude-iot}"
 HEALTH="$RUNTIME_DIR/aircraft-health.json"
 OPTICAL="$RUNTIME_DIR/optical-state.json"
