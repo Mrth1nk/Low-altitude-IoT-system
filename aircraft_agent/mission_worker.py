@@ -13,6 +13,8 @@ MAV_MISSION_OPERATION_CANCELLED = 15
 MAV_MISSION_TYPE_MISSION = 0
 MAV_CMD_NAV_WAYPOINT = 16
 MAV_FRAME_GLOBAL = 0
+MAV_FRAME_GLOBAL_RELATIVE_ALT = 3
+MAV_FRAME_GLOBAL_RELATIVE_ALT_INT = 6
 MAX_PROTOCOL_ITEMS = 100
 
 
@@ -415,18 +417,30 @@ class AircraftMissionWorker:
             raise ValueError("durable mission checksum mismatch")
         items = []
         for sequence, raw in enumerate(raw_items):
+            command = int(raw.get("command", MAV_CMD_NAV_WAYPOINT))
+            frame = int(raw.get("frame", MAV_FRAME_GLOBAL_RELATIVE_ALT_INT))
+            if frame == MAV_FRAME_GLOBAL_RELATIVE_ALT_INT:
+                frame = MAV_FRAME_GLOBAL_RELATIVE_ALT
+            params = {
+                name: float(raw.get(name, 0.0))
+                for name in ("param1", "param2", "param3", "param4")
+            }
+            if command == MAV_CMD_NAV_WAYPOINT:
+                for name, value in params.items():
+                    if value != 0.0:
+                        raise ValueError(
+                            "unsupported simple NAV_WAYPOINT "
+                            f"{name}={value}; params must be zero"
+                        )
             items.append(
                 {
                     "seq": sequence,
-                    "frame": int(raw.get("frame", 6)),
-                    "command": int(raw.get("command", 16)),
+                    "frame": frame,
+                    "command": command,
                     "x": int(round(float(raw["lat"]) * 1e7)),
                     "y": int(round(float(raw["lon"]) * 1e7)),
                     "z": float(raw["alt"]),
-                    "param1": float(raw.get("param1", 0.0)),
-                    "param2": float(raw.get("param2", 0.0)),
-                    "param3": float(raw.get("param3", 0.0)),
-                    "param4": float(raw.get("param4", 0.0)),
+                    **params,
                     "autocontinue": int(bool(raw.get("autocontinue", True))),
                 }
             )

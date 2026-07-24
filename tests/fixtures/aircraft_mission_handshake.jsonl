@@ -5,5 +5,5 @@
 {"type":"MISSION_ACK","result":0,"mission_type":0}
 {"type":"MISSION_COUNT","count":3,"target_system":255,"target_component":0,"source_system":1,"source_component":1,"mission_type":0}
 {"type":"MISSION_ITEM_INT","seq":0,"frame":0,"command":16,"x":321197400,"y":1189531400,"z":0.0,"param1":0.0,"param2":0.0,"param3":0.0,"param4":0.0,"autocontinue":1,"target_system":255,"target_component":0,"source_system":1,"source_component":1,"mission_type":0}
-{"type":"MISSION_ITEM_INT","seq":1,"frame":6,"command":16,"x":321000000,"y":1189000000,"z":20.0,"param1":0.0,"param2":0.0,"param3":0.0,"param4":0.0,"autocontinue":1,"target_system":255,"target_component":0,"source_system":1,"source_component":1,"mission_type":0}
-{"type":"MISSION_ITEM_INT","seq":2,"frame":6,"command":16,"x":321010000,"y":1189010000,"z":20.0,"param1":0.0,"param2":0.0,"param3":0.0,"param4":0.0,"autocontinue":1,"target_system":255,"target_component":0,"source_system":1,"source_component":1,"mission_type":0}
+{"type":"MISSION_ITEM_INT","seq":1,"frame":3,"command":16,"x":321000000,"y":1189000000,"z":20.0,"param1":0.0,"param2":0.0,"param3":0.0,"param4":0.0,"autocontinue":1,"target_system":255,"target_component":0,"source_system":1,"source_component":1,"mission_type":0}
+{"type":"MISSION_ITEM_INT","seq":2,"frame":3,"command":16,"x":321010000,"y":1189010000,"z":20.0,"param1":0.0,"param2":0.0,"param3":0.0,"param4":0.0,"autocontinue":1,"target_system":255,"target_component":0,"source_system":1,"source_component":1,"mission_type":0}

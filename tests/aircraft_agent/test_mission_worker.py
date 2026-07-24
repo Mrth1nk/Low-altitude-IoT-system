@@ -271,7 +271,7 @@ class AircraftMissionWorkerTests(unittest.TestCase):
                 {
                     "type": "MISSION_ITEM_INT",
                     "seq": 1,
-                    "frame": user["frame"],
+                    "frame": 3,
                     "command": user["command"],
                     "x": int(round(user["lat"] * 1e7)),
                     "y": int(round(user["lon"] * 1e7)),
@@ -310,6 +310,72 @@ class AircraftMissionWorkerTests(unittest.TestCase):
             (int(round(user["lat"] * 1e7)), int(round(user["lon"] * 1e7))),
         )
         self.assertNotIn("SET_MODE", [kind for kind, _ in session.sent])
+
+    def test_frame_six_input_is_canonical_frame_three_on_wire_and_readback(self):
+        record = staged_single_waypoint_record()
+        self.assertEqual(record["items"][0]["frame"], 6)
+        user = record["items"][0]
+        session = FakeSession(
+            [
+                {"type": "MISSION_ACK", "result": 0, "mission_type": 0},
+                {"type": "MISSION_REQUEST_INT", "seq": 0, "mission_type": 0},
+                {"type": "MISSION_REQUEST_INT", "seq": 1, "mission_type": 0},
+                {"type": "MISSION_ACK", "result": 0, "mission_type": 0},
+                {"type": "MISSION_COUNT", "count": 2, "mission_type": 0},
+                {
+                    "type": "MISSION_ITEM_INT",
+                    "seq": 0,
+                    "frame": 0,
+                    "command": 16,
+                    "x": 0,
+                    "y": 0,
+                    "z": 0,
+                    "autocontinue": 1,
+                    "mission_type": 0,
+                },
+                {
+                    "type": "MISSION_ITEM_INT",
+                    "seq": 1,
+                    "frame": 3,
+                    "command": 16,
+                    "x": int(round(user["lat"] * 1e7)),
+                    "y": int(round(user["lon"] * 1e7)),
+                    "z": user["alt"],
+                    "autocontinue": 1,
+                    "mission_type": 0,
+                },
+            ]
+        )
+
+        result = self.make_worker(
+            session, AircraftTelemetry(clock=lambda: session.now)
+        ).execute(record)
+
+        self.assertTrue(result.verified)
+        uploaded = [
+            fields["item"]
+            for kind, fields in session.sent
+            if kind == "MISSION_ITEM_INT" and fields["item"]["seq"] == 1
+        ]
+        self.assertEqual(uploaded[0]["frame"], 3)
+
+    def test_explicit_nonzero_simple_waypoint_param_is_rejected_before_clear(self):
+        record = staged_single_waypoint_record()
+        record["items"][0]["param2"] = 2.0
+        record["checksum"] = hashlib.sha256(
+            json.dumps(
+                record["items"],
+                sort_keys=True,
+                separators=(",", ":"),
+                allow_nan=False,
+            ).encode("utf-8")
+        ).hexdigest()
+        session = FakeSession(fixture_messages())
+
+        with self.assertRaisesRegex(ValueError, "unsupported.*param2"):
+            self.make_worker(session).execute(record)
+
+        self.assertEqual(session.sent, [])
 
     def test_repeated_request_bound_and_global_deadline(self):
         messages = [{"type": "MISSION_ACK", "result": 0, "mission_type": 0}]
