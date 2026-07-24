@@ -85,7 +85,7 @@ tail -n 120 /tmp/l610-primary.log
 Run the repository test suite:
 
 ```bash
-python3 -m unittest discover -s tests -v
+python3 -m unittest discover -s tests -t . -v
 ```
 
 Run the imported RDK baseline tests locally or on RDK:
