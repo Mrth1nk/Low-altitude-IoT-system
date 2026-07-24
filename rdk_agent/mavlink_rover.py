@@ -385,7 +385,11 @@ class RoverMavlinkTransport:
         mav = conn.mav
         system = self.rover.target_system
         component = self.rover.target_component
-        mission_type = getattr(mavutil.mavlink, "MAV_MISSION_TYPE_MISSION", 0)
+        mission_type = getattr(
+            getattr(mavutil, "mavlink", None),
+            "MAV_MISSION_TYPE_MISSION",
+            0,
+        )
         if message_type == "MISSION_CLEAR_ALL":
             try:
                 mav.mission_clear_all_send(system, component, mission_type)
@@ -398,45 +402,8 @@ class RoverMavlinkTransport:
                 )
             except TypeError:
                 mav.mission_count_send(system, component, int(fields["count"]))
-        elif message_type in ("MISSION_ITEM", "MISSION_ITEM_INT"):
+        elif message_type == "MISSION_ITEM_INT":
             item = fields["item"]
-            if message_type == "MISSION_ITEM":
-                try:
-                    mav.mission_item_send(
-                        system,
-                        component,
-                        item.seq,
-                        item.frame,
-                        item.command,
-                        1 if item.is_home else 0,
-                        item.autocontinue,
-                        item.param1,
-                        item.param2,
-                        item.param3,
-                        item.param4,
-                        item.x / 1e7,
-                        item.y / 1e7,
-                        item.z,
-                        mission_type,
-                    )
-                except TypeError:
-                    mav.mission_item_send(
-                        system,
-                        component,
-                        item.seq,
-                        item.frame,
-                        item.command,
-                        1 if item.is_home else 0,
-                        item.autocontinue,
-                        item.param1,
-                        item.param2,
-                        item.param3,
-                        item.param4,
-                        item.x / 1e7,
-                        item.y / 1e7,
-                        item.z,
-                    )
-                return
             try:
                 mav.mission_item_int_send(
                     system,
@@ -486,6 +453,20 @@ class RoverMavlinkTransport:
                 mav.mission_request_int_send(
                     system, component, int(fields["seq"])
                 )
+        elif message_type == "MISSION_ACK":
+            try:
+                mav.mission_ack_send(
+                    system,
+                    component,
+                    int(fields["result"]),
+                    int(fields.get("mission_type", mission_type)),
+                )
+            except TypeError:
+                mav.mission_ack_send(
+                    system,
+                    component,
+                    int(fields["result"]),
+                )
         elif message_type == "SET_MODE":
             self.rover.set_mode(str(fields["mode"]))
         else:
@@ -524,10 +505,27 @@ class RoverMavlinkTransport:
                 if self.rover.mission_manager is not None:
                     self.rover.mission_manager.observe(message)
                 continue
-            valid = bool(
-                abs(int(getattr(message, "latitude", 0) or 0)) > 0
-                and abs(int(getattr(message, "longitude", 0) or 0)) > 0
-            )
-            self.rover.home_valid = valid
-            return valid
+            self.dispatch(message)
+            return self.rover.home_valid
         return bool(current or self.rover.home_valid)
+
+    def dispatch(self, message) -> None:
+        getter = getattr(message, "get_type", None)
+        kind = getter() if getter else (
+            message.get("type", "") if isinstance(message, dict) else ""
+        )
+        if kind != "HOME_POSITION":
+            return
+        latitude = (
+            message.get("latitude", 0)
+            if isinstance(message, dict)
+            else getattr(message, "latitude", 0)
+        )
+        longitude = (
+            message.get("longitude", 0)
+            if isinstance(message, dict)
+            else getattr(message, "longitude", 0)
+        )
+        self.rover.home_valid = bool(
+            abs(int(latitude or 0)) > 0 and abs(int(longitude or 0)) > 0
+        )

@@ -214,7 +214,9 @@ class RoverMissionManager:
         attempts = 0
         self.transport.send("MISSION_COUNT", count=len(items))
         while True:
-            message = self._recv()
+            message = self._recv_until(
+                ("MISSION_REQUEST", "MISSION_REQUEST_INT", "MISSION_ACK")
+            )
             if message is None:
                 if attempts >= self.retries:
                     raise MissionTimeout("timeout waiting for mission item request")
@@ -226,12 +228,7 @@ class RoverMissionManager:
                 seq = int(_field(message, "seq", -1))
                 if seq not in by_seq:
                     raise MissionDenied(f"flight controller requested invalid seq={seq}")
-                response_type = (
-                    "MISSION_ITEM"
-                    if kind == "MISSION_REQUEST"
-                    else "MISSION_ITEM_INT"
-                )
-                self.transport.send(response_type, item=by_seq[seq])
+                self.transport.send("MISSION_ITEM_INT", item=by_seq[seq])
                 attempts = 0
                 continue
             if kind == "MISSION_ACK":
@@ -259,6 +256,11 @@ class RoverMissionManager:
         for seq in range(count):
             item = self._download_item(seq)
             downloaded.append(item)
+        self.transport.send(
+            "MISSION_ACK",
+            result=MAV_MISSION_ACCEPTED,
+            mission_type=MAV_MISSION_TYPE_MISSION,
+        )
         return downloaded
 
     def _download_item(self, seq: int) -> MissionItem:
@@ -351,6 +353,9 @@ class RoverMissionManager:
                 return None
             if not self._matches_transaction(message):
                 continue
+            dispatch = getattr(self.transport, "dispatch", None)
+            if dispatch is not None:
+                dispatch(message)
             if message_types is None or _field(message, "type") in message_types:
                 return message
             self.observe(message)

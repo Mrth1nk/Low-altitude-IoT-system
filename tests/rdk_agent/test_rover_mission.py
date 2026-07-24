@@ -24,6 +24,7 @@ class FakeTransport:
         self.sent = []
         self.refreshed_home = refreshed_home
         self.home_refreshes = 0
+        self.home_seen = False
 
     def send(self, message_type, **fields):
         self.sent.append((message_type, fields))
@@ -35,7 +36,22 @@ class FakeTransport:
     def refresh_home(self, current, timeout):
         del timeout
         self.home_refreshes += 1
-        return current if self.refreshed_home is None else self.refreshed_home
+        if self.refreshed_home is not None:
+            return self.refreshed_home
+        return bool(current or self.home_seen)
+
+    def dispatch(self, message):
+        if isinstance(message, dict):
+            kind = message.get("type")
+            latitude = message.get("latitude")
+            longitude = message.get("longitude")
+        else:
+            getter = getattr(message, "get_type", None)
+            kind = getter() if getter else ""
+            latitude = getattr(message, "latitude", None)
+            longitude = getattr(message, "longitude", None)
+        if kind == "HOME_POSITION":
+            self.home_seen = bool(latitude and longitude)
 
 
 def fixture_messages():
@@ -64,7 +80,7 @@ def ready_telemetry():
 
 
 class RoverMissionManagerTests(unittest.TestCase):
-    def test_pairs_legacy_and_int_requests_with_matching_item_encoding(self):
+    def test_legacy_and_int_requests_both_receive_mission_item_int(self):
         messages = fixture_messages()
         messages[1]["type"] = "MISSION_REQUEST"
         transport = FakeTransport(messages)
@@ -80,8 +96,8 @@ class RoverMissionManagerTests(unittest.TestCase):
             if kind in ("MISSION_ITEM", "MISSION_ITEM_INT")
         ]
         self.assertEqual(uploads[:3], [
-            ("MISSION_ITEM", 2),
-            ("MISSION_ITEM", 0),
+            ("MISSION_ITEM_INT", 2),
+            ("MISSION_ITEM_INT", 0),
             ("MISSION_ITEM_INT", 1),
         ])
 
@@ -148,6 +164,10 @@ class RoverMissionManagerTests(unittest.TestCase):
         self.assertEqual(transport.sent[0][0], "MISSION_CLEAR_ALL")
         self.assertEqual(transport.sent[1], ("MISSION_COUNT", {"count": 3}))
         self.assertIn(("MISSION_REQUEST_LIST", {}), transport.sent)
+        self.assertIn(
+            ("MISSION_ACK", {"result": 0, "mission_type": 0}),
+            transport.sent,
+        )
         requested = [
             fields["seq"]
             for kind, fields in transport.sent
@@ -346,6 +366,24 @@ class RoverMissionManagerTests(unittest.TestCase):
         self.assertEqual(transport.home_refreshes, 1)
         self.assertTrue(result.execution_ready)
 
+    def test_home_arriving_during_handshake_is_dispatched_and_makes_gate_ready(self):
+        messages = fixture_messages()
+        messages.insert(1, {
+            "type": "HOME_POSITION",
+            "latitude": 321197400,
+            "longitude": 1189531400,
+        })
+        transport = FakeTransport(messages)
+        manager = RoverMissionManager(transport, timeout=0.01, retries=1)
+
+        result = manager.upload_and_verify(
+            mission_items(), ready_telemetry(), home_valid=False
+        )
+
+        self.assertTrue(transport.home_seen)
+        self.assertTrue(result.verified)
+        self.assertTrue(result.execution_ready)
+
     def test_ignores_other_mission_types_and_wrong_targets_without_retry(self):
         messages = fixture_messages()
         messages.insert(0, {
@@ -426,14 +464,10 @@ class RoverMissionManagerTests(unittest.TestCase):
         self.assertTrue(second)
         self.assertEqual(len(rover.conn.mav.commands), 1)
 
-    def test_transport_encodes_float_and_int_mission_items_separately(self):
+    def test_transport_only_encodes_mission_item_int(self):
         class FakeMav:
             def __init__(self):
-                self.float_items = []
                 self.int_items = []
-
-            def mission_item_send(self, *args):
-                self.float_items.append(args)
 
             def mission_item_int_send(self, *args):
                 self.int_items.append(args)
@@ -449,15 +483,35 @@ class RoverMissionManagerTests(unittest.TestCase):
         )
 
         with patch("rdk_agent.mavlink_rover.mavutil", fake_mavutil):
-            transport.send("MISSION_ITEM", item=item)
             transport.send("MISSION_ITEM_INT", item=item)
 
-        float_args = rover.conn.mav.float_items[0]
         int_args = rover.conn.mav.int_items[0]
-        self.assertAlmostEqual(float_args[11], 32.11974, places=7)
-        self.assertAlmostEqual(float_args[12], 118.95314, places=7)
         self.assertEqual(int_args[11], 321197400)
         self.assertEqual(int_args[12], 1189531400)
+        with self.assertRaisesRegex(ValueError, "unsupported"):
+            transport.send("MISSION_ITEM", item=item)
+
+    def test_transport_sends_final_download_ack_with_mission_type(self):
+        class FakeMav:
+            def __init__(self):
+                self.acks = []
+
+            def mission_ack_send(self, *args):
+                self.acks.append(args)
+
+        rover = RoverMavlink([])
+        rover.conn = SimpleNamespace(mav=FakeMav())
+        rover.target_system = 1
+        rover.target_component = 1
+        transport = RoverMavlinkTransport(rover)
+        fake_mavutil = SimpleNamespace(
+            mavlink=SimpleNamespace(MAV_MISSION_TYPE_MISSION=0)
+        )
+
+        with patch("rdk_agent.mavlink_rover.mavutil", fake_mavutil):
+            transport.send("MISSION_ACK", result=0, mission_type=0)
+
+        self.assertEqual(rover.conn.mav.acks, [(1, 1, 0, 0)])
 
     def test_manual_rc_override_behavior_is_preserved(self):
         class FakeMav:
