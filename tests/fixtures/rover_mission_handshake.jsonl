@@ -1,0 +1,9 @@
+{"direction":"fc_to_rdk","type":"MISSION_ACK","result":0,"phase":"clear"}
+{"direction":"fc_to_rdk","type":"MISSION_REQUEST_INT","seq":2}
+{"direction":"fc_to_rdk","type":"MISSION_REQUEST","seq":0}
+{"direction":"fc_to_rdk","type":"MISSION_REQUEST_INT","seq":1}
+{"direction":"fc_to_rdk","type":"MISSION_ACK","result":0,"phase":"upload"}
+{"direction":"fc_to_rdk","type":"MISSION_COUNT","count":3,"phase":"download"}
+{"direction":"fc_to_rdk","type":"MISSION_ITEM_INT","seq":0,"frame":0,"command":16,"x":0,"y":0,"z":0}
+{"direction":"fc_to_rdk","type":"MISSION_ITEM_INT","seq":1,"frame":6,"command":16,"x":321197400,"y":1189531400,"z":0}
+{"direction":"fc_to_rdk","type":"MISSION_ITEM_INT","seq":2,"frame":6,"command":16,"x":321198000,"y":1189538000,"z":0}

@@ -205,6 +205,23 @@ def run_agent(config: dict) -> int:
 
     class RoverExecutor:
         def execute(self, command):
+            if command.action == "mission":
+                items = command.payload.get("items")
+                if not isinstance(items, list):
+                    raise ValueError("rover mission requires items")
+                result = rover.upload_mission(items, telemetry)
+                telemetry.mission_status = (
+                    "verified ready"
+                    if result.execution_ready
+                    else f"verified not ready: {result.reason}"
+                )
+                return {
+                    "accepted": True,
+                    "stage": "verified",
+                    "message": telemetry.mission_status,
+                    "verified": result.verified,
+                    "execution_ready": result.execution_ready,
+                }
             rover_command = RoverCommand.from_dict(
                 {"command": command.action, **command.payload},
                 source="command_router",

@@ -3,7 +3,12 @@ from __future__ import annotations
 import glob
 import time
 
-from rover_state import RoverCommand, RoverTelemetry, clamp
+try:
+    from .rover_state import RoverCommand, RoverTelemetry, clamp
+    from .rover_mission import MissionItem, RoverMissionManager
+except ImportError:
+    from rover_state import RoverCommand, RoverTelemetry, clamp
+    from rover_mission import MissionItem, RoverMissionManager
 
 try:
     from pymavlink import mavutil
@@ -49,6 +54,8 @@ class RoverMavlink:
         self.throttle_min = 1000
         self.throttle_trim = 1500
         self.throttle_max = 2000
+        self.home_valid = False
+        self.mission_manager = None
 
     def connect(self, timeout: float = 2.5) -> bool:
         if mavutil is None:
@@ -66,6 +73,9 @@ class RoverMavlink:
                     self.target_system = conn.target_system or 1
                     self.target_component = conn.target_component or 0
                     self.last_heartbeat = time.time()
+                    self.mission_manager = RoverMissionManager(
+                        RoverMavlinkTransport(self)
+                    )
                     self.load_rc_params()
                     return True
                 conn.close()
@@ -80,6 +90,7 @@ class RoverMavlink:
             except Exception:
                 pass
         self.conn = None
+        self.mission_manager = None
 
     def update_telemetry(self, telemetry: RoverTelemetry) -> RoverTelemetry:
         if not self.connect(timeout=0.2):
@@ -125,6 +136,14 @@ class RoverMavlink:
                 telemetry.satellites_visible = int(getattr(msg, "satellites_visible", 0) or 0)
             elif typ == "EKF_STATUS_REPORT":
                 telemetry.ekf_flags = int(getattr(msg, "flags", 0) or 0)
+            elif typ == "HOME_POSITION":
+                self.home_valid = bool(
+                    abs(int(getattr(msg, "latitude", 0) or 0)) > 0
+                    and abs(int(getattr(msg, "longitude", 0) or 0)) > 0
+                )
+            elif typ in ("MISSION_CURRENT", "MISSION_ITEM_REACHED"):
+                if self.mission_manager is not None:
+                    self.mission_manager.observe(msg)
         return telemetry
 
     def apply(self, command: RoverCommand, telemetry: RoverTelemetry) -> tuple[bool, str]:
@@ -154,8 +173,13 @@ class RoverMavlink:
                 self.manual(command.steering, command.throttle)
                 return True, "manual control sent"
             if cmd in ("guided", "auto", "hold"):
+                if cmd == "auto" and self.mission_manager is not None:
+                    self.mission_manager.start_auto()
+                    return True, "verified mission AUTO started"
                 self.set_mode(cmd.upper())
                 return True, f"mode {cmd} sent"
+            if cmd == "mission":
+                return False, "mission requires full mission payload"
             if cmd in ("goto", "waypoint"):
                 if abs(command.target_lat) < 0.000001 or abs(command.target_lng) < 0.000001:
                     return False, "invalid waypoint"
@@ -316,3 +340,102 @@ class RoverMavlink:
             0,
             0,
         )
+
+    def upload_mission(
+        self, raw_items: list[dict], telemetry: RoverTelemetry
+    ):
+        if not self.connect(timeout=0.5):
+            raise RuntimeError("flight controller not connected")
+        if self.mission_manager is None:
+            self.mission_manager = RoverMissionManager(RoverMavlinkTransport(self))
+        items = [
+            MissionItem.from_payload(item, seq=index)
+            for index, item in enumerate(raw_items, 1)
+        ]
+        return self.mission_manager.upload_and_verify(
+            items, telemetry, home_valid=self.home_valid
+        )
+
+
+class RoverMavlinkTransport:
+    """Adapter that keeps RoverMavlink as the sole connection owner."""
+
+    def __init__(self, rover: RoverMavlink):
+        self.rover = rover
+
+    def recv(self, timeout: float):
+        return self.rover.conn.recv_match(blocking=True, timeout=timeout)
+
+    def send(self, message_type: str, **fields) -> None:
+        conn = self.rover.conn
+        mav = conn.mav
+        system = self.rover.target_system
+        component = self.rover.target_component
+        mission_type = getattr(mavutil.mavlink, "MAV_MISSION_TYPE_MISSION", 0)
+        if message_type == "MISSION_CLEAR_ALL":
+            try:
+                mav.mission_clear_all_send(system, component, mission_type)
+            except TypeError:
+                mav.mission_clear_all_send(system, component)
+        elif message_type == "MISSION_COUNT":
+            try:
+                mav.mission_count_send(
+                    system, component, int(fields["count"]), mission_type
+                )
+            except TypeError:
+                mav.mission_count_send(system, component, int(fields["count"]))
+        elif message_type == "MISSION_ITEM_INT":
+            item = fields["item"]
+            try:
+                mav.mission_item_int_send(
+                    system,
+                    component,
+                    item.seq,
+                    item.frame,
+                    item.command,
+                    1 if item.is_home else 0,
+                    item.autocontinue,
+                    item.param1,
+                    item.param2,
+                    item.param3,
+                    item.param4,
+                    item.x,
+                    item.y,
+                    item.z,
+                    mission_type,
+                )
+            except TypeError:
+                mav.mission_item_int_send(
+                    system,
+                    component,
+                    item.seq,
+                    item.frame,
+                    item.command,
+                    1 if item.is_home else 0,
+                    item.autocontinue,
+                    item.param1,
+                    item.param2,
+                    item.param3,
+                    item.param4,
+                    item.x,
+                    item.y,
+                    item.z,
+                )
+        elif message_type == "MISSION_REQUEST_LIST":
+            try:
+                mav.mission_request_list_send(system, component, mission_type)
+            except TypeError:
+                mav.mission_request_list_send(system, component)
+        elif message_type == "MISSION_REQUEST_INT":
+            try:
+                mav.mission_request_int_send(
+                    system, component, int(fields["seq"]), mission_type
+                )
+            except TypeError:
+                mav.mission_request_int_send(
+                    system, component, int(fields["seq"])
+                )
+        elif message_type == "SET_MODE":
+            self.rover.set_mode(str(fields["mode"]))
+        else:
+            raise ValueError(f"unsupported Rover MAVLink message {message_type}")
