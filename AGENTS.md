@@ -82,11 +82,17 @@ ip route get 139.196.6.123
 tail -n 120 /tmp/l610-primary.log
 ```
 
-Run RDK tests locally or on RDK:
+Run the repository test suite:
 
 ```bash
-cd uav_tuya_agent
 python3 -m unittest discover -s tests -v
+```
+
+Run the imported RDK baseline tests locally or on RDK:
+
+```bash
+cd rdk_agent
+PYTHONPATH=. python3 -m unittest discover -s tests -v
 ```
 
 Run Tuya cloud ground station locally:
