@@ -1,3 +1,4 @@
+import hashlib
 import json
 from pathlib import Path
 import queue
@@ -78,6 +79,23 @@ def staged_record():
         "items": [first.payload, second.payload],
         "checksum": commit.payload["checksum"],
         "stage": "MISSION_STAGED",
+    }
+
+
+def staged_single_waypoint_record():
+    record = staged_record()
+    items = record["items"][:1]
+    return {
+        **record,
+        "items": items,
+        "checksum": hashlib.sha256(
+            json.dumps(
+                items,
+                sort_keys=True,
+                separators=(",", ":"),
+                allow_nan=False,
+            ).encode("utf-8")
+        ).hexdigest(),
     }
 
 
@@ -191,7 +209,16 @@ class AircraftMissionWorkerTests(unittest.TestCase):
             for kind, fields in session.sent
             if kind == "MISSION_ITEM_INT"
         ]
-        self.assertEqual(uploaded, [1, 0])
+        self.assertEqual(uploaded, [2, 0, 1])
+        protocol_home = next(
+            fields["item"]
+            for kind, fields in session.sent
+            if kind == "MISSION_ITEM_INT" and fields["item"]["seq"] == 0
+        )
+        self.assertEqual(
+            (protocol_home["frame"], protocol_home["x"], protocol_home["y"]),
+            (0, 321197400, 1189531400),
+        )
         self.assertNotIn("MISSION_ITEM", [kind for kind, _ in session.sent])
         self.assertIn(("SET_MODE", {"mode": "AUTO"}), session.sent)
         self.assertEqual(
@@ -203,7 +230,9 @@ class AircraftMissionWorkerTests(unittest.TestCase):
         )
 
     def test_indoor_upload_and_readback_verify_but_never_enter_auto(self):
-        session = FakeSession(fixture_messages())
+        messages = fixture_messages()
+        messages[6].update({"x": 0, "y": 0, "z": 0.0})
+        session = FakeSession(messages)
         telemetry = AircraftTelemetry(clock=lambda: session.now)
 
         result = self.make_worker(session, telemetry).execute(
@@ -214,6 +243,73 @@ class AircraftMissionWorkerTests(unittest.TestCase):
         self.assertFalse(result.execution_ready)
         self.assertNotIn("SET_MODE", [kind for kind, _ in session.sent])
         self.assertIn("GPS", result.reason)
+
+    def test_ardupilot_protocol_home_does_not_replace_first_user_waypoint(self):
+        user = staged_single_waypoint_record()["items"][0]
+        session = FakeSession(
+            [
+                {"type": "MISSION_ACK", "result": 0, "mission_type": 0},
+                {"type": "MISSION_REQUEST_INT", "seq": 1, "mission_type": 0},
+                {"type": "MISSION_REQUEST_INT", "seq": 0, "mission_type": 0},
+                {"type": "MISSION_ACK", "result": 0, "mission_type": 0},
+                {"type": "MISSION_COUNT", "count": 2, "mission_type": 0},
+                {
+                    "type": "MISSION_ITEM_INT",
+                    "seq": 0,
+                    "frame": 0,
+                    "command": 16,
+                    "x": 0,
+                    "y": 0,
+                    "z": 0,
+                    "param1": 0,
+                    "param2": 0,
+                    "param3": 0,
+                    "param4": 0,
+                    "autocontinue": 1,
+                    "mission_type": 0,
+                },
+                {
+                    "type": "MISSION_ITEM_INT",
+                    "seq": 1,
+                    "frame": user["frame"],
+                    "command": user["command"],
+                    "x": int(round(user["lat"] * 1e7)),
+                    "y": int(round(user["lon"] * 1e7)),
+                    "z": user["alt"],
+                    "param1": user["param1"],
+                    "param2": user["param2"],
+                    "param3": user["param3"],
+                    "param4": user["param4"],
+                    "autocontinue": 1,
+                    "mission_type": 0,
+                },
+            ]
+        )
+        telemetry = AircraftTelemetry(clock=lambda: session.now)
+
+        result = self.make_worker(session, telemetry).execute(
+            staged_single_waypoint_record(), start_auto=True
+        )
+
+        self.assertTrue(result.verified)
+        self.assertFalse(result.execution_ready)
+        self.assertEqual(result.item_count, 1)
+        self.assertIn(
+            ("MISSION_COUNT", {"count": 2, "mission_type": 0}),
+            session.sent,
+        )
+        uploaded = [
+            fields["item"]
+            for kind, fields in session.sent
+            if kind == "MISSION_ITEM_INT"
+        ]
+        self.assertEqual([item["seq"] for item in uploaded], [1, 0])
+        self.assertEqual((uploaded[1]["frame"], uploaded[1]["x"], uploaded[1]["y"]), (0, 0, 0))
+        self.assertEqual(
+            (uploaded[0]["x"], uploaded[0]["y"]),
+            (int(round(user["lat"] * 1e7)), int(round(user["lon"] * 1e7))),
+        )
+        self.assertNotIn("SET_MODE", [kind for kind, _ in session.sent])
 
     def test_repeated_request_bound_and_global_deadline(self):
         messages = [{"type": "MISSION_ACK", "result": 0, "mission_type": 0}]
@@ -285,12 +381,12 @@ class AircraftMissionWorkerTests(unittest.TestCase):
                 for kind, fields in session.sent
                 if kind == "MISSION_ITEM_INT"
             ],
-            [1, 0],
+            [2, 0, 1],
         )
 
     def test_denied_upload_ack_is_typed_and_cleanup_is_accepted(self):
         messages = fixture_messages()
-        messages[3]["result"] = 14
+        messages[4]["result"] = 14
         messages.append({"type": "MISSION_ACK", "result": 0, "mission_type": 0})
         session = FakeSession(messages)
 

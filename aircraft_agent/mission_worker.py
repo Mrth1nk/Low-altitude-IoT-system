@@ -11,6 +11,9 @@ from .telemetry import field, message_type
 MAV_MISSION_ACCEPTED = 0
 MAV_MISSION_OPERATION_CANCELLED = 15
 MAV_MISSION_TYPE_MISSION = 0
+MAV_CMD_NAV_WAYPOINT = 16
+MAV_FRAME_GLOBAL = 0
+MAX_PROTOCOL_ITEMS = 100
 
 
 class MissionError(RuntimeError):
@@ -70,7 +73,8 @@ class AircraftMissionWorker:
         self._requests = {}
 
     def execute(self, record, *, start_auto=False):
-        items = self._items_from_record(record)
+        user_items = self._items_from_record(record)
+        items = self._protocol_items(user_items)
         self._deadline = self.clock() + self.operation_timeout
         self._requests = {}
         with self.session.transaction() as transaction:
@@ -78,7 +82,8 @@ class AircraftMissionWorker:
                 self._clear(transaction)
                 self._upload(transaction, items)
                 downloaded = self._download(transaction, len(items))
-                self._verify(items, downloaded)
+                self._verify_protocol_home(items[0], downloaded[0])
+                self._verify(items[1:], downloaded[1:])
             except Exception as original:
                 if not self._cleanup(transaction):
                     raise MissionUnsafeResidual(
@@ -86,7 +91,7 @@ class AircraftMissionWorker:
                     ) from original
                 raise
             ready, reason = self.telemetry.execution_gate()
-            result = MissionResult(True, ready, reason, len(items))
+            result = MissionResult(True, ready, reason, len(user_items))
             if start_auto and ready:
                 self.session.send("SET_MODE", mode="AUTO")
             return result
@@ -252,6 +257,24 @@ class AircraftMissionWorker:
                     f"mission readback autocontinue mismatch seq={sequence}"
                 )
 
+    def _verify_protocol_home(self, wanted, received):
+        if (
+            int(received["seq"]) != 0
+            or int(received["command"]) != MAV_CMD_NAV_WAYPOINT
+            or int(received["frame"]) != MAV_FRAME_GLOBAL
+        ):
+            raise MissionVerificationError(
+                "mission readback protocol Home command/frame mismatch seq=0"
+            )
+        if (
+            abs(wanted["x"] - received["x"]) > self.coordinate_tolerance
+            or abs(wanted["y"] - received["y"]) > self.coordinate_tolerance
+            or abs(wanted["z"] - received["z"]) > self.altitude_tolerance
+        ):
+            raise MissionVerificationError(
+                "mission readback protocol Home position mismatch seq=0"
+            )
+
     def _receive(self, transaction, accepted):
         while True:
             remaining = self._deadline - self.clock()
@@ -336,6 +359,37 @@ class AircraftMissionWorker:
     def _ack_result(message):
         return int(field(message, "result", field(message, "type", -1)))
 
+    def _protocol_items(self, user_items):
+        home = self.telemetry.snapshot()
+        if home.get("home_valid"):
+            x = int(home.get("home_lat", 0) or 0)
+            y = int(home.get("home_lon", 0) or 0)
+            z = float(home.get("home_alt", 0.0) or 0.0)
+        else:
+            x = y = 0
+            z = 0.0
+        protocol_home = {
+            "seq": 0,
+            "frame": MAV_FRAME_GLOBAL,
+            "command": MAV_CMD_NAV_WAYPOINT,
+            "x": x,
+            "y": y,
+            "z": z,
+            "param1": 0.0,
+            "param2": 0.0,
+            "param3": 0.0,
+            "param4": 0.0,
+            "autocontinue": 1,
+            "protocol_home": True,
+        }
+        return [
+            protocol_home,
+            *[
+                {**item, "seq": index}
+                for index, item in enumerate(user_items, start=1)
+            ],
+        ]
+
     @staticmethod
     def _items_from_record(record):
         if not isinstance(record, dict) or record.get("kind") != "mission":
@@ -345,8 +399,10 @@ class AircraftMissionWorker:
         raw_items = record.get("items")
         if not isinstance(raw_items, list) or not raw_items:
             raise ValueError("complete durable mission items are required")
-        if len(raw_items) > 100:
-            raise ValueError("aircraft mission exceeds 100 items")
+        if len(raw_items) >= MAX_PROTOCOL_ITEMS:
+            raise ValueError(
+                "aircraft mission exceeds 99 user items plus protocol Home"
+            )
         checksum = hashlib.sha256(
             json.dumps(
                 raw_items,

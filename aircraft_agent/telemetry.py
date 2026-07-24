@@ -30,6 +30,9 @@ class AircraftTelemetry:
             "lat": 0,
             "lon": 0,
             "home_valid": False,
+            "home_lat": 0,
+            "home_lon": 0,
+            "home_alt": 0.0,
             "ekf_flags": 0,
             "gps_at": 0.0,
             "position_at": 0.0,
@@ -60,6 +63,11 @@ class AircraftTelemetry:
                 lat = int(field(message, "latitude", 0) or 0)
                 lon = int(field(message, "longitude", 0) or 0)
                 self._state["home_valid"] = bool(lat and lon)
+                self._state["home_lat"] = lat
+                self._state["home_lon"] = lon
+                self._state["home_alt"] = (
+                    float(field(message, "altitude", 0) or 0) / 1000.0
+                )
                 self._state["home_at"] = now
             elif kind == "EKF_STATUS_REPORT":
                 self._state["ekf_flags"] = int(field(message, "flags", 0) or 0)
