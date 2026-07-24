@@ -2,6 +2,8 @@
 
 import hashlib
 import json
+from collections import OrderedDict
+import uuid
 
 from shared_protocol.frame import Frame, MessageType, decode_frame, encode_frame
 from shared_protocol.messages import MAX_MISSION_ITEMS
@@ -15,6 +17,8 @@ class AircraftLink:
         self._stage = "idle"
         self._error = ""
         self._transaction_id = ""
+        self._terminal = OrderedDict()
+        self._terminal_limit = 1024
 
     @property
     def pending_count(self):
@@ -33,6 +37,8 @@ class AircraftLink:
     def execute(self, command, now=None):
         if command.target != "aircraft":
             raise ValueError("AircraftLink accepts aircraft commands only")
+        if command.command_id in self._terminal:
+            raise ValueError("aircraft transaction is already terminal")
         now = 0.0 if now is None else float(now)
         self._transaction_id = str(command.command_id)
         self._error = ""
@@ -118,19 +124,25 @@ class AircraftLink:
     def due_bytes(self, now):
         due = self.sender.due(now)
         exhausted = self.sender.pop_exhausted()
-        if due:
+        if due and not exhausted:
             self._stage = "awaiting_ack"
         if exhausted:
-            command_id, sequence = exhausted[-1]
-            self._stage = "retry_exhausted"
-            self._error = (
-                f"command {command_id} sequence {sequence} retry exhausted"
-            )
+            for command_id, sequence in exhausted:
+                self._set_terminal(
+                    command_id,
+                    "retry_exhausted",
+                    f"command {command_id} sequence {sequence} retry exhausted",
+                )
+            due = [
+                frame for frame in due if frame.command_id not in self._terminal
+            ]
         return [encode_frame(frame) for frame in due]
 
     def accept_ack(self, data):
         frame = decode_frame(data) if isinstance(data, (bytes, bytearray)) else data
         if not isinstance(frame, Frame) or frame.message_type is not MessageType.ACK:
+            return False
+        if frame.command_id in self._terminal:
             return False
         accepted = self.sender.acknowledge(
             frame.command_id, frame.payload["acked_sequence"]
@@ -146,13 +158,42 @@ class AircraftLink:
             return self.accept_ack(frame)
         if frame.message_type is not MessageType.NACK:
             return False
+        if frame.command_id in self._terminal:
+            return False
         accepted = self.sender.acknowledge(
             frame.command_id, frame.payload["acked_sequence"]
         )
         if accepted:
-            self._stage = "nacked"
-            self._error = str(frame.payload["reason"])[:120]
+            self._set_terminal(
+                frame.command_id, "nacked", str(frame.payload["reason"])[:120]
+            )
         return accepted
+
+    def fail_transaction(self, stage, error, command_id=None):
+        if stage not in ("retry_exhausted", "transport_error"):
+            raise ValueError("invalid terminal transaction stage")
+        command_id = command_id or self._current_command_id()
+        if command_id is None:
+            return False
+        if command_id in self._terminal:
+            return False
+        self._set_terminal(command_id, stage, str(error)[:120])
+        return True
+
+    def _current_command_id(self):
+        if not self._transaction_id:
+            return None
+        return uuid.UUID(self._transaction_id)
+
+    def _set_terminal(self, command_id, stage, error):
+        self.sender.cancel(command_id)
+        self._terminal[command_id] = (stage, error)
+        self._terminal.move_to_end(command_id)
+        while len(self._terminal) > self._terminal_limit:
+            self._terminal.popitem(last=False)
+        if str(command_id) == self._transaction_id:
+            self._stage = stage
+            self._error = error
 
     def transaction_state(self):
         state = {

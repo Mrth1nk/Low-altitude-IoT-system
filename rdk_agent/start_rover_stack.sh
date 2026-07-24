@@ -1,9 +1,17 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-cd "$(dirname "$0")"
-REPO_PARENT="$(cd .. && pwd)"
-export PYTHONPATH="$REPO_PARENT${PYTHONPATH:+:$PYTHONPATH}"
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+REPO_ROOT="${REPO_ROOT:-$(cd "$SCRIPT_DIR/.." && pwd)}"
+RDK_DIR="$REPO_ROOT/rdk_agent"
+
+if [ ! -f "$REPO_ROOT/shared_protocol/__init__.py" ] || [ ! -f "$RDK_DIR/tuya_rover_agent.py" ]; then
+  echo "error: full repository layout required at $REPO_ROOT (expected sibling rdk_agent and shared_protocol)" >&2
+  exit 2
+fi
+
+cd "$RDK_DIR"
+export PYTHONPATH="$REPO_ROOT${PYTHONPATH:+:$PYTHONPATH}"
 
 if [ "${IMPORT_CHECK_ONLY:-0}" = "1" ]; then
   "${PYTHON_BIN:-python3}" -c "import shared_protocol; import aircraft_link; import aircraft_transport; import command_router"

@@ -56,6 +56,14 @@ class RetrySender:
     def acknowledge(self, command_id, sequence):
         return self._pending.pop((command_id, sequence), None) is not None
 
+    def cancel(self, command_id):
+        cancelled = [
+            identity for identity in self._pending if identity[0] == command_id
+        ]
+        for identity in cancelled:
+            del self._pending[identity]
+        return cancelled
+
     def pop_exhausted(self):
         exhausted = list(self._exhausted)
         self._exhausted.clear()

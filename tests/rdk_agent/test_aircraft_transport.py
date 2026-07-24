@@ -123,7 +123,8 @@ class AircraftTransportTests(unittest.TestCase):
     def test_retries_exhaust_into_transaction_error(self):
         self.queue()
         self.transport.pump(now=0.0)
-        self.peer.recvfrom(4096)
+        first_data, sender = self.peer.recvfrom(4096)
+        first_frame = decode_frame(first_data)
         self.transport.pump(now=0.02)
         self.peer.recvfrom(4096)
         self.transport.pump(now=0.04)
@@ -132,6 +133,22 @@ class AircraftTransportTests(unittest.TestCase):
         self.assertEqual(state["stage"], "retry_exhausted")
         self.assertEqual(state["pending"], 0)
         self.assertIn("sequence", state["error"])
+
+        late_ack = Frame(
+            MessageType.ACK,
+            0,
+            95,
+            first_frame.command_id,
+            {"acked_sequence": first_frame.sequence},
+        )
+        self.peer.sendto(encode_frame(late_ack), sender)
+        self.pump_until(
+            lambda: self.transport.transaction_state()["stage"]
+            == "retry_exhausted"
+        )
+        self.assertEqual(
+            self.transport.transaction_state()["stage"], "retry_exhausted"
+        )
 
     def test_udp_send_error_is_exposed_as_transaction_error(self):
         self.queue()
@@ -154,7 +171,32 @@ class AircraftTransportTests(unittest.TestCase):
         state = self.transport.pump(now=0.0)
 
         self.assertEqual(state["stage"], "transport_error")
+        self.assertEqual(state["pending"], 0)
         self.assertIn("network down", state["error"])
+
+    def test_udp_receive_error_is_terminal_for_current_transaction(self):
+        self.queue()
+        real_socket = self.transport._socket
+
+        class ReceiveFailingSocket:
+            def recvfrom(self, size):
+                raise OSError("socket closed")
+
+            def sendto(self, payload, peer):
+                return len(payload)
+
+            def getsockname(self):
+                return real_socket.getsockname()
+
+            def close(self):
+                real_socket.close()
+
+        self.transport._socket = ReceiveFailingSocket()
+        state = self.transport.pump(now=0.0)
+
+        self.assertEqual(state["stage"], "transport_error")
+        self.assertEqual(state["pending"], 0)
+        self.assertIn("socket closed", state["error"])
 
     def test_nack_updates_transaction_error_and_clears_matching_frame(self):
         self.queue()
@@ -230,6 +272,47 @@ class StartupImportTests(unittest.TestCase):
 
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("runtime imports ok", result.stdout)
+
+    def test_install_dry_run_points_service_at_full_repository_layout(self):
+        repo = Path(__file__).resolve().parents[2]
+        env = dict(os.environ)
+        env["DRY_RUN"] = "1"
+        env["REPO_ROOT"] = str(repo)
+
+        result = subprocess.run(
+            ["bash", "rdk_agent/install_rdk_boot_services.sh"],
+            cwd=repo,
+            env=env,
+            text=True,
+            capture_output=True,
+            timeout=5,
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn(f"WorkingDirectory={repo}", result.stdout)
+        self.assertIn(
+            f"ExecStart={repo}/rdk_agent/start_rover_stack.sh", result.stdout
+        )
+        self.assertIn(f"PYTHONPATH={repo}", result.stdout)
+
+    def test_start_fails_clearly_when_shared_protocol_is_missing(self):
+        repo = Path(__file__).resolve().parents[2]
+        env = dict(os.environ)
+        env["IMPORT_CHECK_ONLY"] = "1"
+        env["REPO_ROOT"] = str(repo / "does-not-exist")
+
+        result = subprocess.run(
+            ["bash", "rdk_agent/start_rover_stack.sh"],
+            cwd=repo,
+            env=env,
+            text=True,
+            capture_output=True,
+            timeout=5,
+        )
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("shared_protocol", result.stderr)
+        self.assertIn("full repository", result.stderr)
 
 
 if __name__ == "__main__":

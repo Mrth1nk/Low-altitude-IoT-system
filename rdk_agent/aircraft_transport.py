@@ -69,6 +69,8 @@ class AircraftTransport:
 
     def pump(self, now, max_receive=32):
         self._receive(max_receive)
+        if self._transport_error:
+            return self.transaction_state()
         if self._peer is None:
             return self.transaction_state()
         try:
@@ -77,6 +79,9 @@ class AircraftTransport:
             self._transport_error = ""
         except OSError as exc:
             self._transport_error = f"udp send failed: {exc}"
+            self.aircraft_link.fail_transaction(
+                "transport_error", self._transport_error
+            )
         return self.transaction_state()
 
     def _receive(self, max_receive):
@@ -87,6 +92,9 @@ class AircraftTransport:
                 return
             except OSError as exc:
                 self._transport_error = f"udp receive failed: {exc}"
+                self.aircraft_link.fail_transaction(
+                    "transport_error", self._transport_error
+                )
                 return
             if self._allowed_peer_host and remote[0] != self._allowed_peer_host:
                 continue

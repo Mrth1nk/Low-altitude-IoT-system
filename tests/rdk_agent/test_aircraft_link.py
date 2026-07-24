@@ -104,6 +104,42 @@ class AircraftLinkTests(unittest.TestCase):
                 now=0.0,
             )
 
+    def test_mission_nack_is_terminal_cancels_all_frames_and_ignores_late_ack(self):
+        self.link.execute(
+            self.command(
+                "mission",
+                {"mission_id": "terminal", "items": mission_items()},
+            ),
+            now=0.0,
+        )
+        frames = [decode_frame(blob) for blob in self.link.due_bytes(0.0)]
+        self.assertEqual(len(frames), 4)
+        rejected = frames[1]
+
+        nack = Frame(
+            MessageType.NACK,
+            0,
+            800,
+            self.command_id,
+            {"acked_sequence": rejected.sequence, "reason": "bad_mission_item"},
+        )
+        self.assertTrue(self.link.accept_response(nack))
+        self.assertEqual(self.link.pending_count, 0)
+        self.assertEqual(self.link.due_bytes(10.0), [])
+        state = self.link.transaction_state()
+        self.assertEqual(state["stage"], "nacked")
+        self.assertEqual(state["error"], "bad_mission_item")
+
+        late_ack = Frame(
+            MessageType.ACK,
+            0,
+            801,
+            self.command_id,
+            {"acked_sequence": frames[-1].sequence},
+        )
+        self.assertFalse(self.link.accept_response(late_ack))
+        self.assertEqual(self.link.transaction_state()["stage"], "nacked")
+
 
 if __name__ == "__main__":
     unittest.main()

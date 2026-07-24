@@ -99,6 +99,44 @@ class RetrySenderTests(unittest.TestCase):
 
         self.assertEqual(sender.pop_exhausted(), [(self.command_id, 11)])
 
+    def test_cancel_removes_every_pending_frame_for_one_command_only(self):
+        sender = RetrySender()
+        other_id = uuid.uuid4()
+        for sequence in range(3):
+            sender.queue(
+                Frame(
+                    MessageType.COMMAND,
+                    0,
+                    sequence,
+                    self.command_id,
+                    {"action": "arm", "parameters": {}},
+                ),
+                now=0.0,
+            )
+        sender.queue(
+            Frame(
+                MessageType.COMMAND,
+                0,
+                3,
+                other_id,
+                {"action": "land", "parameters": {}},
+            ),
+            now=0.0,
+        )
+
+        self.assertEqual(
+            sender.cancel(self.command_id),
+            [
+                (self.command_id, 0),
+                (self.command_id, 1),
+                (self.command_id, 2),
+            ],
+        )
+        self.assertEqual(sender.pending_count, 1)
+        self.assertEqual(
+            [frame.command_id for frame in sender.due(0.0)], [other_id]
+        )
+
 
 class ReceiverStateTests(unittest.TestCase):
     def setUp(self):

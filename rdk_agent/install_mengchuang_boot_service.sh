@@ -1,7 +1,13 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-APP_DIR="${APP_DIR:-/home/sunrise/uav_tuya_agent}"
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+REPO_ROOT="${REPO_ROOT:-$(cd "$SCRIPT_DIR/.." && pwd)}"
+if [ ! -f "$REPO_ROOT/shared_protocol/__init__.py" ] || [ ! -d "$REPO_ROOT/rdk_agent" ]; then
+  echo "error: full repository layout required at $REPO_ROOT (expected sibling rdk_agent and shared_protocol)" >&2
+  exit 2
+fi
+
 MENGCHUANG_CONNECTION="${MENGCHUANG_CONNECTION:-mengchuang}"
 MENGCHUANG_IFACE="${MENGCHUANG_IFACE:-wlan0}"
 
