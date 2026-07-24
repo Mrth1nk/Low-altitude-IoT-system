@@ -200,8 +200,12 @@ class RoverMavlink:
         return telemetry
 
     def apply(self, command: RoverCommand, telemetry: RoverTelemetry) -> tuple[bool, str]:
-        with self.session_lock:
+        if not self.session_lock.acquire(blocking=False):
+            return False, "flight controller busy: mission transaction active"
+        try:
             return self._apply_locked(command, telemetry)
+        finally:
+            self.session_lock.release()
 
     def _apply_locked(self, command: RoverCommand, telemetry: RoverTelemetry) -> tuple[bool, str]:
         telemetry.last_command = command.command
@@ -441,7 +445,12 @@ class RoverMavlink:
         )
 
     def queue_mission(
-        self, command_id: str, raw_items: list[dict], telemetry: RoverTelemetry
+        self,
+        command_id: str,
+        raw_items: list[dict],
+        telemetry: RoverTelemetry,
+        *,
+        source_timestamp=None,
     ):
         if len(raw_items) > 100:
             raise ValueError("mission exceeds maximum 100 executable items")
@@ -454,6 +463,7 @@ class RoverMavlink:
             items,
             copy.deepcopy(telemetry),
             self.home_valid,
+            source_timestamp=source_timestamp,
         )
 
     def drain_mission_results(self):
@@ -463,12 +473,12 @@ class RoverMavlink:
         with self.session_lock:
             if not self.connect(timeout=0.5):
                 raise MissionError("flight controller not connected")
-            if self.mission_manager is None:
-                self.mission_manager = RoverMissionManager(
-                    RoverMavlinkTransport(self),
-                    vehicle_system=self.target_system,
-                    vehicle_component=self.target_component,
-                )
+            transport = RoverMavlinkTransport(self, telemetry=job.telemetry)
+            self.mission_manager = RoverMissionManager(
+                transport,
+                vehicle_system=self.target_system,
+                vehicle_component=self.target_component,
+            )
             return self.mission_manager.upload_and_verify(
                 job.items,
                 job.telemetry,
@@ -480,9 +490,10 @@ class RoverMavlink:
 class RoverMavlinkTransport:
     """Adapter that keeps RoverMavlink as the sole connection owner."""
 
-    def __init__(self, rover: RoverMavlink, clock=None):
+    def __init__(self, rover: RoverMavlink, clock=None, telemetry=None):
         self.rover = rover
         self.clock = clock or time.monotonic
+        self.telemetry = telemetry
 
     def recv(self, timeout: float):
         return self.rover.conn.recv_match(blocking=True, timeout=timeout)
@@ -608,11 +619,11 @@ class RoverMavlinkTransport:
                 break
             getter = getattr(message, "get_type", None)
             kind = getter() if getter else ""
+            self.dispatch(message)
             if kind != "HOME_POSITION":
                 if self.rover.mission_manager is not None:
                     self.rover.mission_manager.observe(message)
                 continue
-            self.dispatch(message)
             return self.rover.home_valid
         return bool(current or self.rover.home_valid)
 
@@ -621,26 +632,48 @@ class RoverMavlinkTransport:
         kind = getter() if getter else (
             message.get("type", "") if isinstance(message, dict) else ""
         )
+        now = self.clock()
+        telemetry = self.telemetry
+        if kind == "GPS_RAW_INT" and telemetry is not None:
+            telemetry.gps_fix_type = int(_message_field(message, "fix_type", 0) or 0)
+            telemetry.satellites_visible = int(
+                _message_field(message, "satellites_visible", 0) or 0
+            )
+            telemetry.gps_generation = self.rover.connection_generation
+            telemetry.gps_updated_monotonic = now
+            return
+        if kind == "GLOBAL_POSITION_INT" and telemetry is not None:
+            telemetry.lat = float(_message_field(message, "lat", 0) or 0) / 1e7
+            telemetry.lng = float(_message_field(message, "lon", 0) or 0) / 1e7
+            telemetry.position_generation = self.rover.connection_generation
+            telemetry.position_updated_monotonic = now
+            return
+        if kind == "EKF_STATUS_REPORT" and telemetry is not None:
+            telemetry.ekf_flags = int(_message_field(message, "flags", 0) or 0)
+            telemetry.ekf_generation = self.rover.connection_generation
+            telemetry.ekf_updated_monotonic = now
+            return
         if kind != "HOME_POSITION":
             return
-        latitude = (
-            message.get("latitude", 0)
-            if isinstance(message, dict)
-            else getattr(message, "latitude", 0)
-        )
-        longitude = (
-            message.get("longitude", 0)
-            if isinstance(message, dict)
-            else getattr(message, "longitude", 0)
-        )
+        latitude = _message_field(message, "latitude", 0)
+        longitude = _message_field(message, "longitude", 0)
         self.rover.home_valid = bool(
             abs(int(latitude or 0)) > 0 and abs(int(longitude or 0)) > 0
         )
         if self.rover.home_valid:
-            self.rover.home_updated_monotonic = self.clock()
+            self.rover.home_updated_monotonic = now
+            if telemetry is not None:
+                telemetry.home_generation = self.rover.connection_generation
+                telemetry.home_updated_monotonic = now
 
     def sync_navigation(self, telemetry) -> None:
         telemetry.connection_generation = self.rover.connection_generation
         if self.rover.home_valid:
             telemetry.home_generation = self.rover.connection_generation
             telemetry.home_updated_monotonic = self.rover.home_updated_monotonic
+
+
+def _message_field(message, name, default=None):
+    if isinstance(message, dict):
+        return message.get(name, default)
+    return getattr(message, name, default)

@@ -8,6 +8,7 @@ from rdk_agent.rover_mission import (
     MissionDenied,
     MissionError,
     MissionItem,
+    MissionResidualUnsafe,
     MissionTimeout,
     MissionVerificationError,
     RoverMissionManager,
@@ -21,16 +22,25 @@ FIXTURE = Path(__file__).parents[1] / "fixtures" / "rover_mission_handshake.json
 
 
 class FakeTransport:
-    def __init__(self, messages=(), refreshed_home=None):
+    def __init__(
+        self, messages=(), refreshed_home=None, auto_cleanup_ack=True
+    ):
         self.messages = list(messages)
         self.sent = []
         self.refreshed_home = refreshed_home
+        self.auto_cleanup_ack = auto_cleanup_ack
         self.home_refreshes = 0
         self.home_seen = False
         self.clock_value = 0.0
 
     def send(self, message_type, **fields):
         self.sent.append((message_type, fields))
+        if (
+            message_type == "MISSION_CLEAR_ALL"
+            and self.auto_cleanup_ack
+            and sum(kind == "MISSION_CLEAR_ALL" for kind, _ in self.sent) > 1
+        ):
+            self.messages.append({"type": "MISSION_ACK", "result": 0})
 
     def recv(self, timeout):
         del timeout
@@ -84,6 +94,130 @@ def ready_telemetry():
 
 
 class RoverMissionManagerTests(unittest.TestCase):
+    def test_navigation_messages_during_long_handshake_refresh_execution_snapshot(self):
+        now = [10.0]
+        telemetry = RoverTelemetry(
+            connection_generation=1,
+            gps_fix_type=0,
+            satellites_visible=0,
+            lat=0,
+            lng=0,
+            ekf_flags=0,
+        )
+        messages = fixture_messages()
+        messages.insert(1, {
+            "type": "GPS_RAW_INT",
+            "fix_type": 3,
+            "satellites_visible": 10,
+        })
+        messages.insert(2, {
+            "type": "GLOBAL_POSITION_INT",
+            "lat": 321197400,
+            "lon": 1189531400,
+        })
+        messages.insert(3, {"type": "EKF_STATUS_REPORT", "flags": 0x11})
+        messages.insert(4, {
+            "type": "HOME_POSITION",
+            "latitude": 321197400,
+            "longitude": 1189531400,
+        })
+
+        class NavigationTransport(FakeTransport):
+            def dispatch(self, message):
+                kind = message.get("type")
+                if kind in (
+                    "GPS_RAW_INT",
+                    "GLOBAL_POSITION_INT",
+                    "EKF_STATUS_REPORT",
+                    "HOME_POSITION",
+                ):
+                    now[0] += 1.1
+                if kind == "GPS_RAW_INT":
+                    telemetry.gps_fix_type = message["fix_type"]
+                    telemetry.satellites_visible = message["satellites_visible"]
+                    telemetry.gps_generation = 1
+                    telemetry.gps_updated_monotonic = now[0]
+                elif kind == "GLOBAL_POSITION_INT":
+                    telemetry.lat = message["lat"] / 1e7
+                    telemetry.lng = message["lon"] / 1e7
+                    telemetry.position_generation = 1
+                    telemetry.position_updated_monotonic = now[0]
+                elif kind == "EKF_STATUS_REPORT":
+                    telemetry.ekf_flags = message["flags"]
+                    telemetry.ekf_generation = 1
+                    telemetry.ekf_updated_monotonic = now[0]
+                elif kind == "HOME_POSITION":
+                    self.home_seen = True
+                    telemetry.home_generation = 1
+                    telemetry.home_updated_monotonic = now[0]
+
+        manager = RoverMissionManager(
+            NavigationTransport(messages),
+            timeout=5,
+            retries=1,
+            clock=lambda: now[0],
+            operation_timeout=30,
+            navigation_freshness=5,
+        )
+
+        result = manager.upload_and_verify(
+            mission_items(), telemetry, home_valid=False
+        )
+
+        self.assertTrue(result.execution_ready, result.reason)
+
+    def test_failed_cleanup_requires_accepted_ack_and_blocks_auto(self):
+        messages = fixture_messages()
+        upload_ack = next(
+            index for index, item in enumerate(messages)
+            if item.get("type") == "MISSION_ACK" and item.get("phase") == "upload"
+        )
+        messages[upload_ack]["result"] = 14
+        messages.extend([
+            {"type": "MISSION_ACK", "result": 14},
+            None,
+        ])
+        transport = FakeTransport(messages, auto_cleanup_ack=False)
+        manager = RoverMissionManager(
+            transport, timeout=0.01, retries=1, operation_timeout=5
+        )
+
+        with self.assertRaisesRegex(MissionResidualUnsafe, "unsafe residual"):
+            manager.upload_and_verify(
+                mission_items(), ready_telemetry(), home_valid=True
+            )
+
+        clear_count = sum(
+            kind == "MISSION_CLEAR_ALL" for kind, _fields in transport.sent
+        )
+        self.assertEqual(clear_count, 3)
+        self.assertTrue(manager.status.residual_unsafe)
+        self.assertFalse(manager.status.verified)
+        self.assertFalse(manager.status.execution_ready)
+        with self.assertRaisesRegex(RuntimeError, "unsafe residual"):
+            manager.start_auto()
+
+    def test_successful_failure_cleanup_leaves_no_residual_but_auto_unverified(self):
+        messages = fixture_messages()
+        upload_ack = next(
+            index for index, item in enumerate(messages)
+            if item.get("type") == "MISSION_ACK" and item.get("phase") == "upload"
+        )
+        messages[upload_ack]["result"] = 14
+        messages.append({"type": "MISSION_ACK", "result": 0})
+        manager = RoverMissionManager(
+            FakeTransport(messages), timeout=0.01, retries=1
+        )
+
+        with self.assertRaises(MissionDenied):
+            manager.upload_and_verify(
+                mission_items(), ready_telemetry(), home_valid=True
+            )
+
+        self.assertFalse(manager.status.residual_unsafe)
+        with self.assertRaisesRegex(RuntimeError, "not execution ready"):
+            manager.start_auto()
+
     def test_execution_gate_rejects_stale_or_previous_connection_navigation(self):
         telemetry = ready_telemetry()
         telemetry.connection_generation = 2
@@ -580,6 +714,60 @@ class RoverMissionManagerTests(unittest.TestCase):
         self.assertTrue(first)
         self.assertTrue(second)
         self.assertEqual(len(rover.conn.mav.commands), 1)
+
+    def test_home_refresh_dispatches_navigation_before_home_response(self):
+        class Message:
+            def __init__(self, kind, **fields):
+                self.kind = kind
+                for name, value in fields.items():
+                    setattr(self, name, value)
+
+            def get_type(self):
+                return self.kind
+
+        class FakeMav:
+            def command_long_send(self, *args):
+                del args
+
+        class FakeConnection:
+            def __init__(self):
+                self.mav = FakeMav()
+                self.messages = [
+                    Message("GPS_RAW_INT", fix_type=3, satellites_visible=11),
+                    Message(
+                        "GLOBAL_POSITION_INT",
+                        lat=321197400,
+                        lon=1189531400,
+                    ),
+                    Message("EKF_STATUS_REPORT", flags=0x11),
+                    Message(
+                        "HOME_POSITION",
+                        latitude=321197400,
+                        longitude=1189531400,
+                    ),
+                ]
+
+            def recv_match(self, blocking, timeout):
+                del blocking, timeout
+                return self.messages.pop(0) if self.messages else None
+
+        rover = RoverMavlink([])
+        rover.conn = FakeConnection()
+        rover.connection_generation = 2
+        rover.target_system = 1
+        rover.target_component = 1
+        telemetry = RoverTelemetry(connection_generation=2)
+        now = [10.0]
+        transport = RoverMavlinkTransport(
+            rover, clock=lambda: now[0], telemetry=telemetry
+        )
+
+        self.assertTrue(transport.refresh_home(False, timeout=1))
+        self.assertEqual(telemetry.gps_fix_type, 3)
+        self.assertEqual(telemetry.satellites_visible, 11)
+        self.assertAlmostEqual(telemetry.lat, 32.11974)
+        self.assertAlmostEqual(telemetry.lng, 118.95314)
+        self.assertEqual(telemetry.ekf_flags, 0x11)
 
     def test_transport_only_encodes_mission_item_int(self):
         class FakeMav:

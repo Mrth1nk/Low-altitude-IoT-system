@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections import OrderedDict
 from dataclasses import dataclass, field
 import queue
 import threading
@@ -32,6 +33,10 @@ class MissionDenied(MissionError):
 
 
 class MissionVerificationError(MissionError):
+    pass
+
+
+class MissionResidualUnsafe(MissionError):
     pass
 
 
@@ -81,6 +86,7 @@ class MissionStatus:
     reached_seq: int = 0
     endpoint_reached: bool = False
     completed: bool = False
+    residual_unsafe: bool = False
     reason: str = ""
 
 
@@ -98,6 +104,7 @@ class MissionJob:
     items: tuple
     telemetry: Any
     home_valid: bool
+    source_timestamp: float
 
 
 @dataclass(frozen=True)
@@ -112,32 +119,86 @@ class MissionJobStatus:
 class RoverMissionWorker:
     """Single FIFO mission worker with command-id-addressable results."""
 
-    def __init__(self, operation):
+    TERMINAL_STAGES = ("verified", "failed", "cancelled", "unsafe_residual")
+
+    def __init__(
+        self,
+        operation,
+        *,
+        max_pending=4,
+        max_history=64,
+        max_age_seconds=10.0,
+        wall_clock=None,
+    ):
+        if max_pending < 1 or max_history < 1 or max_age_seconds <= 0:
+            raise ValueError("mission worker bounds must be positive")
         self.operation = operation
-        self._queue = queue.Queue()
-        self._statuses = {}
+        self.max_pending = int(max_pending)
+        self.max_history = int(max_history)
+        self.max_age_seconds = float(max_age_seconds)
+        self.wall_clock = wall_clock or time.time
+        self._queue = queue.Queue(maxsize=self.max_pending)
+        self._statuses = OrderedDict()
         self._condition = threading.Condition()
         self._closed = False
         self._emitted = set()
+        self._active_command_id = None
+        self._latest_source_timestamp = float("-inf")
         self._thread = threading.Thread(
             target=self._run, name="rover-mission-worker", daemon=True
         )
         self._thread.start()
 
-    def submit(self, command_id, items, telemetry, home_valid):
+    def submit(
+        self,
+        command_id,
+        items,
+        telemetry,
+        home_valid,
+        *,
+        source_timestamp=None,
+    ):
         job = MissionJob(
-            str(command_id), tuple(items), telemetry, bool(home_valid)
+            str(command_id),
+            tuple(items),
+            telemetry,
+            bool(home_valid),
+            float(self.wall_clock() if source_timestamp is None else source_timestamp),
         )
         with self._condition:
             if self._closed:
                 raise RuntimeError("mission worker is closed")
             if job.command_id in self._statuses:
                 return self._statuses[job.command_id]
+            pending = sum(
+                status.stage not in self.TERMINAL_STAGES
+                for status in self._statuses.values()
+            )
+            if pending >= self.max_pending:
+                raise MissionError("mission worker queue is full")
             status = MissionJobStatus(job.command_id, "queued")
             self._statuses[job.command_id] = status
-            self._queue.put(job)
+            self._latest_source_timestamp = max(
+                self._latest_source_timestamp, job.source_timestamp
+            )
+            self._queue.put_nowait(job)
+            self._trim_history()
             self._condition.notify_all()
             return status
+
+    def cancel(self, command_id):
+        command_id = str(command_id)
+        with self._condition:
+            status = self._statuses.get(command_id)
+            if status is None or status.stage in self.TERMINAL_STAGES:
+                return False
+            if command_id == self._active_command_id:
+                return False
+            self._statuses[command_id] = MissionJobStatus(
+                command_id, "cancelled", "mission cancelled before execution"
+            )
+            self._condition.notify_all()
+            return True
 
     def status(self, command_id):
         with self._condition:
@@ -148,7 +209,7 @@ class RoverMissionWorker:
         with self._condition:
             while True:
                 status = self._statuses.get(str(command_id))
-                if status and status.stage in ("verified", "failed"):
+                if status and status.stage in self.TERMINAL_STAGES:
                     return status
                 remaining = (
                     None if deadline is None else deadline - time.monotonic()
@@ -162,7 +223,7 @@ class RoverMissionWorker:
             return [
                 status
                 for status in self._statuses.values()
-                if status.stage in ("verified", "failed")
+                if status.stage in self.TERMINAL_STAGES
             ]
 
     def drain_completed(self):
@@ -170,10 +231,11 @@ class RoverMissionWorker:
             ready = [
                 status
                 for command_id, status in self._statuses.items()
-                if status.stage in ("verified", "failed")
+                if status.stage in self.TERMINAL_STAGES
                 and command_id not in self._emitted
             ]
             self._emitted.update(status.command_id for status in ready)
+            self._trim_history()
             return ready
 
     def close(self):
@@ -187,6 +249,26 @@ class RoverMissionWorker:
             job = self._queue.get()
             if job is None:
                 return
+            with self._condition:
+                status = self._statuses.get(job.command_id)
+                if status is None or status.stage == "cancelled":
+                    continue
+                if (
+                    self.wall_clock() - job.source_timestamp > self.max_age_seconds
+                    or job.source_timestamp < self._latest_source_timestamp
+                ):
+                    reason = (
+                        "stale mission expired before execution"
+                        if self.wall_clock() - job.source_timestamp > self.max_age_seconds
+                        else "mission superseded before execution"
+                    )
+                    self._statuses[job.command_id] = MissionJobStatus(
+                        job.command_id, "failed", reason, "MissionError"
+                    )
+                    self._condition.notify_all()
+                    self._trim_history()
+                    continue
+                self._active_command_id = job.command_id
             self._set(MissionJobStatus(job.command_id, "uploading"))
             try:
                 result = self.operation(
@@ -205,19 +287,46 @@ class RoverMissionWorker:
                     )
                 )
             except Exception as exc:
+                terminal_stage = (
+                    "unsafe_residual"
+                    if isinstance(exc, MissionResidualUnsafe)
+                    else "failed"
+                )
                 self._set(
                     MissionJobStatus(
                         job.command_id,
-                        "failed",
+                        terminal_stage,
                         message=str(exc),
                         error_type=type(exc).__name__,
                     )
                 )
+            finally:
+                with self._condition:
+                    self._active_command_id = None
+                    self._trim_history()
 
     def _set(self, status):
         with self._condition:
             self._statuses[status.command_id] = status
+            self._statuses.move_to_end(status.command_id)
+            self._trim_history()
             self._condition.notify_all()
+
+    def _trim_history(self):
+        while len(self._statuses) > self.max_history:
+            removable = next(
+                (
+                    command_id
+                    for command_id, status in self._statuses.items()
+                    if status.stage in self.TERMINAL_STAGES
+                    and command_id != self._active_command_id
+                ),
+                None,
+            )
+            if removable is None:
+                break
+            self._statuses.pop(removable, None)
+            self._emitted.discard(removable)
 
 
 class RoverMissionManager:
@@ -293,11 +402,12 @@ class RoverMissionManager:
             is_home=True,
         )
         upload_items = [home, *executable]
-        self.status = MissionStatus()
+        self.status = MissionStatus(residual_unsafe=self.status.residual_unsafe)
         self._operation_deadline = self.clock() + self.operation_timeout
         self._sequence_requests = {}
         try:
             self._clear()
+            self.status.residual_unsafe = False
             self._upload(upload_items)
             if progress is not None:
                 progress("verifying", "reading mission back")
@@ -321,14 +431,22 @@ class RoverMissionManager:
             self.status.execution_ready = ready
             self.status.reason = reason
             return MissionResult(True, ready, len(executable), reason)
-        except Exception:
+        except Exception as exc:
             self.status.verified = False
             self.status.execution_ready = False
             self.executable_items = []
-            self._cancel_and_clear()
+            if not self._cancel_and_clear():
+                self.status.residual_unsafe = True
+                self.status.reason = "unsafe residual mission after failed cleanup"
+                raise MissionResidualUnsafe(
+                    f"{exc}; unsafe residual mission cleanup not acknowledged"
+                ) from exc
+            self.status.residual_unsafe = False
             raise
 
     def start_auto(self) -> None:
+        if self.status.residual_unsafe:
+            raise RuntimeError("unsafe residual mission blocks AUTO")
         if not self.status.verified or not self.status.execution_ready:
             raise RuntimeError("mission is not execution ready")
         self.status.completed = False
@@ -574,10 +692,8 @@ class RoverMissionManager:
                 result=MAV_MISSION_OPERATION_CANCELLED,
                 mission_type=MAV_MISSION_TYPE_MISSION,
             )
-            self.transport.send("MISSION_CLEAR_ALL")
-            cleanup_deadline = self.clock() + max(1.0, self.timeout)
-            while self.clock() < cleanup_deadline:
-                message = self.transport.recv(cleanup_deadline - self.clock())
+            for _drained in range(256):
+                message = self.transport.recv(0.0)
                 if message is None:
                     break
                 if not self._matches_transaction(message):
@@ -585,10 +701,28 @@ class RoverMissionManager:
                 dispatch = getattr(self.transport, "dispatch", None)
                 if dispatch is not None:
                     dispatch(message)
-                if _field(message, "type") == "MISSION_ACK":
+            for _attempt in range(self.retries + 1):
+                self.transport.send("MISSION_CLEAR_ALL")
+                cleanup_deadline = self.clock() + max(1.0, self.timeout)
+                while self.clock() < cleanup_deadline:
+                    message = self.transport.recv(
+                        max(0.0, cleanup_deadline - self.clock())
+                    )
+                    if message is None:
+                        break
+                    if not self._matches_transaction(message):
+                        continue
+                    dispatch = getattr(self.transport, "dispatch", None)
+                    if dispatch is not None:
+                        dispatch(message)
+                    if _field(message, "type") != "MISSION_ACK":
+                        continue
+                    if _ack_result(message) == MAV_MISSION_ACCEPTED:
+                        return True
                     break
         except Exception:
-            pass
+            return False
+        return False
 
     def _matches_transaction(self, message) -> bool:
         mission_type = _optional_field(message, "mission_type")

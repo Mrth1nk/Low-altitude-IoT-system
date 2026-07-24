@@ -216,7 +216,10 @@ def run_agent(config: dict) -> int:
                 if not isinstance(items, list):
                     raise ValueError("rover mission requires items")
                 status = rover.queue_mission(
-                    str(command.command_id), items, telemetry
+                    str(command.command_id),
+                    items,
+                    telemetry,
+                    source_timestamp=command.source_timestamp,
                 )
                 telemetry.mission_status = "mission queued"
                 return {
