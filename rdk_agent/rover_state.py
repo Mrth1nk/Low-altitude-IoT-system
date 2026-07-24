@@ -178,6 +178,15 @@ class RoverTelemetry:
     gps_fix_type: int = 0
     satellites_visible: int = 0
     ekf_flags: int = 0
+    connection_generation: int = 0
+    gps_generation: int = 0
+    position_generation: int = 0
+    ekf_generation: int = 0
+    home_generation: int = 0
+    gps_updated_monotonic: float = 0.0
+    position_updated_monotonic: float = 0.0
+    ekf_updated_monotonic: float = 0.0
+    home_updated_monotonic: float = 0.0
     control_mode: str = "standby"
     mission_status: str = "idle"
     target_lat: float = 0.0
@@ -347,6 +356,26 @@ def record_command_receipt(
     telemetry.rover_transaction_stage = stage
     telemetry.rover_transaction_id = command_id
     telemetry.rover_transaction_pending = 0
+
+
+def apply_rover_mission_status(telemetry, status) -> dict[str, Any]:
+    """Apply one terminal async mission result and return a typed receipt."""
+    telemetry.rover_transaction_id = str(status.command_id)
+    telemetry.rover_transaction_stage = str(status.stage)
+    telemetry.rover_transaction_pending = 0
+    telemetry.mission_status = str(status.message or status.stage)
+    telemetry.fault_text = (
+        f"{status.error_type}: {status.message}"
+        if status.stage == "failed"
+        else ""
+    )
+    return {
+        "command_id": str(status.command_id),
+        "stage": str(status.stage),
+        "accepted": status.stage == "verified",
+        "error_type": str(status.error_type),
+        "message": str(status.message),
+    }
 
 
 @dataclass

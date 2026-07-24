@@ -6,10 +6,12 @@ from unittest.mock import patch
 
 from rdk_agent.rover_mission import (
     MissionDenied,
+    MissionError,
     MissionItem,
     MissionTimeout,
     MissionVerificationError,
     RoverMissionManager,
+    RoverMissionWorker,
 )
 from rdk_agent.mavlink_rover import RoverMavlink, RoverMavlinkTransport
 from rdk_agent.rover_state import RoverTelemetry
@@ -25,12 +27,14 @@ class FakeTransport:
         self.refreshed_home = refreshed_home
         self.home_refreshes = 0
         self.home_seen = False
+        self.clock_value = 0.0
 
     def send(self, message_type, **fields):
         self.sent.append((message_type, fields))
 
     def recv(self, timeout):
         del timeout
+        self.clock_value += 0.01
         return self.messages.pop(0) if self.messages else None
 
     def refresh_home(self, current, timeout):
@@ -80,6 +84,119 @@ def ready_telemetry():
 
 
 class RoverMissionManagerTests(unittest.TestCase):
+    def test_execution_gate_rejects_stale_or_previous_connection_navigation(self):
+        telemetry = ready_telemetry()
+        telemetry.connection_generation = 2
+        telemetry.gps_generation = 2
+        telemetry.position_generation = 2
+        telemetry.ekf_generation = 1
+        telemetry.home_generation = 2
+        telemetry.gps_updated_monotonic = 99.0
+        telemetry.position_updated_monotonic = 99.0
+        telemetry.ekf_updated_monotonic = 99.0
+        telemetry.home_updated_monotonic = 99.0
+        manager = RoverMissionManager(
+            FakeTransport(fixture_messages()),
+            timeout=0.01,
+            clock=lambda: 100.0,
+            navigation_freshness=3.0,
+        )
+
+        ready, reason = manager._execution_gate(
+            telemetry, True, now=100.0, freshness=3.0
+        )
+        self.assertFalse(ready)
+        self.assertIn("EKF generation", reason)
+
+        telemetry.ekf_generation = 2
+        telemetry.gps_updated_monotonic = 96.9
+        ready, reason = manager._execution_gate(
+            telemetry, True, now=100.0, freshness=3.0
+        )
+        self.assertFalse(ready)
+        self.assertIn("GPS stale", reason)
+
+    def test_disconnect_invalidates_home_and_navigation_generation(self):
+        rover = RoverMavlink([])
+        rover.connection_generation = 3
+        rover.home_valid = True
+        rover.home_updated_monotonic = 10.0
+        rover.close()
+        self.assertFalse(rover.home_valid)
+        self.assertEqual(rover.home_updated_monotonic, 0.0)
+        self.assertEqual(rover.connection_generation, 4)
+
+    def test_repeated_valid_request_hits_per_sequence_bound_and_cleans_partial(self):
+        messages = [
+            {"type": "MISSION_ACK", "result": 0},
+            *[{"type": "MISSION_REQUEST_INT", "seq": 1} for _ in range(5)],
+            {"type": "MISSION_ACK", "result": 0},
+        ]
+        transport = FakeTransport(messages)
+        manager = RoverMissionManager(
+            transport, timeout=0.01, retries=1, max_sequence_requests=2,
+            operation_timeout=1.0, clock=lambda: transport.clock_value,
+        )
+        with self.assertRaisesRegex(MissionError, "request limit"):
+            manager.upload_and_verify(
+                mission_items(), ready_telemetry(), home_valid=True
+            )
+        self.assertIn(
+            ("MISSION_ACK", {"result": 15, "mission_type": 0}),
+            transport.sent,
+        )
+        self.assertGreaterEqual(
+            len([x for x in transport.sent if x[0] == "MISSION_CLEAR_ALL"]), 2
+        )
+        self.assertFalse(manager.status.verified)
+        self.assertFalse(manager.status.execution_ready)
+
+    def test_operation_deadline_does_not_reset_on_valid_requests(self):
+        transport = FakeTransport(
+            [{"type": "MISSION_ACK", "result": 0}]
+            + [{"type": "MISSION_REQUEST_INT", "seq": 1}] * 20
+            + [{"type": "MISSION_ACK", "result": 0}]
+        )
+        manager = RoverMissionManager(
+            transport, timeout=0.01, retries=1, max_sequence_requests=100,
+            operation_timeout=0.05, clock=lambda: transport.clock_value,
+        )
+        with self.assertRaisesRegex(MissionTimeout, "operation deadline"):
+            manager.upload_and_verify(
+                mission_items(), ready_telemetry(), home_valid=True
+            )
+        self.assertEqual(
+            transport.messages,
+            [],
+            "failure cleanup must use its own deadline and consume clear ACK",
+        )
+
+    def test_rejects_more_than_100_items_before_clear(self):
+        transport = FakeTransport()
+        manager = RoverMissionManager(transport)
+        with self.assertRaisesRegex(ValueError, "100"):
+            manager.upload_and_verify(
+                [mission_items()[0]] * 101, ready_telemetry(), home_valid=True
+            )
+        self.assertEqual(transport.sent, [])
+
+    def test_readback_compares_params_and_autocontinue(self):
+        for field, value in (
+            ("param1", 1.0),
+            ("param2", 1.0),
+            ("param3", 1.0),
+            ("param4", 1.0),
+            ("autocontinue", 0),
+        ):
+            messages = fixture_messages()
+            item = next(x for x in messages if x.get("seq") == 1 and x.get("type") == "MISSION_ITEM_INT")
+            item[field] = value
+            manager = RoverMissionManager(FakeTransport(messages), timeout=0.01)
+            with self.subTest(field=field):
+                with self.assertRaisesRegex(MissionVerificationError, field):
+                    manager.upload_and_verify(
+                        mission_items(), ready_telemetry(), home_valid=True
+                    )
     def test_legacy_and_int_requests_both_receive_mission_item_int(self):
         messages = fixture_messages()
         messages[1]["type"] = "MISSION_REQUEST"

@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import queue
+import threading
 import time
 from typing import Any, Iterable
 
@@ -13,6 +15,8 @@ MAV_FRAME_GLOBAL = 0
 MAV_FRAME_GLOBAL_RELATIVE_ALT_INT = 6
 MAV_MISSION_TYPE_MISSION = 0
 MAV_MISSION_STATE_COMPLETE = 5
+MAV_MISSION_OPERATION_CANCELLED = 15
+MAX_EXECUTABLE_ITEMS = 100
 
 
 class MissionError(RuntimeError):
@@ -88,6 +92,134 @@ class MissionResult:
     reason: str = ""
 
 
+@dataclass(frozen=True)
+class MissionJob:
+    command_id: str
+    items: tuple
+    telemetry: Any
+    home_valid: bool
+
+
+@dataclass(frozen=True)
+class MissionJobStatus:
+    command_id: str
+    stage: str
+    message: str = ""
+    error_type: str = ""
+    result: Any = None
+
+
+class RoverMissionWorker:
+    """Single FIFO mission worker with command-id-addressable results."""
+
+    def __init__(self, operation):
+        self.operation = operation
+        self._queue = queue.Queue()
+        self._statuses = {}
+        self._condition = threading.Condition()
+        self._closed = False
+        self._emitted = set()
+        self._thread = threading.Thread(
+            target=self._run, name="rover-mission-worker", daemon=True
+        )
+        self._thread.start()
+
+    def submit(self, command_id, items, telemetry, home_valid):
+        job = MissionJob(
+            str(command_id), tuple(items), telemetry, bool(home_valid)
+        )
+        with self._condition:
+            if self._closed:
+                raise RuntimeError("mission worker is closed")
+            if job.command_id in self._statuses:
+                return self._statuses[job.command_id]
+            status = MissionJobStatus(job.command_id, "queued")
+            self._statuses[job.command_id] = status
+            self._queue.put(job)
+            self._condition.notify_all()
+            return status
+
+    def status(self, command_id):
+        with self._condition:
+            return self._statuses.get(str(command_id))
+
+    def wait(self, command_id, timeout=None):
+        deadline = None if timeout is None else time.monotonic() + timeout
+        with self._condition:
+            while True:
+                status = self._statuses.get(str(command_id))
+                if status and status.stage in ("verified", "failed"):
+                    return status
+                remaining = (
+                    None if deadline is None else deadline - time.monotonic()
+                )
+                if remaining is not None and remaining <= 0:
+                    raise TimeoutError(f"mission job {command_id} not complete")
+                self._condition.wait(remaining)
+
+    def completed(self):
+        with self._condition:
+            return [
+                status
+                for status in self._statuses.values()
+                if status.stage in ("verified", "failed")
+            ]
+
+    def drain_completed(self):
+        with self._condition:
+            ready = [
+                status
+                for command_id, status in self._statuses.items()
+                if status.stage in ("verified", "failed")
+                and command_id not in self._emitted
+            ]
+            self._emitted.update(status.command_id for status in ready)
+            return ready
+
+    def close(self):
+        with self._condition:
+            self._closed = True
+        self._queue.put(None)
+        self._thread.join(timeout=1)
+
+    def _run(self):
+        while True:
+            job = self._queue.get()
+            if job is None:
+                return
+            self._set(MissionJobStatus(job.command_id, "uploading"))
+            try:
+                result = self.operation(
+                    job,
+                    lambda stage, message="": self._set(
+                        MissionJobStatus(
+                            job.command_id, str(stage), str(message)
+                        )
+                    ),
+                )
+                self._set(
+                    MissionJobStatus(
+                        job.command_id,
+                        "verified",
+                        result=getattr(result, "__dict__", result),
+                    )
+                )
+            except Exception as exc:
+                self._set(
+                    MissionJobStatus(
+                        job.command_id,
+                        "failed",
+                        message=str(exc),
+                        error_type=type(exc).__name__,
+                    )
+                )
+
+    def _set(self, status):
+        with self._condition:
+            self._statuses[status.command_id] = status
+            self._condition.notify_all()
+
+
 class RoverMissionManager:
     def __init__(
         self,
@@ -101,6 +233,11 @@ class RoverMissionManager:
         gcs_component: int = 0,
         vehicle_system: int | None = None,
         vehicle_component: int | None = None,
+        operation_timeout: float = 10.0,
+        max_sequence_requests: int = 5,
+        param_tolerance: float = 1e-4,
+        clock=None,
+        navigation_freshness: float = 3.0,
     ):
         if retries < 0:
             raise ValueError("retries must be non-negative")
@@ -117,6 +254,13 @@ class RoverMissionManager:
         self.vehicle_component = (
             None if vehicle_component is None else int(vehicle_component)
         )
+        self.operation_timeout = float(operation_timeout)
+        self.max_sequence_requests = int(max_sequence_requests)
+        self.param_tolerance = float(param_tolerance)
+        self.clock = clock or time.monotonic
+        self.navigation_freshness = float(navigation_freshness)
+        self._operation_deadline = float("inf")
+        self._sequence_requests = {}
         self.status = MissionStatus()
         self.executable_items: list[MissionItem] = []
 
@@ -126,10 +270,15 @@ class RoverMissionManager:
         telemetry,
         *,
         home_valid: bool,
+        progress=None,
     ) -> MissionResult:
         executable = list(items)
         if not executable:
             raise ValueError("mission requires at least one executable item")
+        if len(executable) > MAX_EXECUTABLE_ITEMS:
+            raise ValueError(
+                f"mission exceeds maximum {MAX_EXECUTABLE_ITEMS} executable items"
+            )
         executable = [
             item if item.seq == index else MissionItem(**{**item.__dict__, "seq": index})
             for index, item in enumerate(executable, 1)
@@ -145,21 +294,39 @@ class RoverMissionManager:
         )
         upload_items = [home, *executable]
         self.status = MissionStatus()
+        self._operation_deadline = self.clock() + self.operation_timeout
+        self._sequence_requests = {}
+        try:
+            self._clear()
+            self._upload(upload_items)
+            if progress is not None:
+                progress("verifying", "reading mission back")
+            downloaded = self._download(len(upload_items))
+            self._verify(upload_items, downloaded)
 
-        self._clear()
-        self._upload(upload_items)
-        downloaded = self._download(len(upload_items))
-        self._verify(upload_items, downloaded)
-
-        refresh_home = getattr(self.transport, "refresh_home", None)
-        if refresh_home is not None:
-            home_valid = bool(refresh_home(home_valid, self.timeout))
-        ready, reason = self._execution_gate(telemetry, home_valid)
-        self.executable_items = executable
-        self.status.verified = True
-        self.status.execution_ready = ready
-        self.status.reason = reason
-        return MissionResult(True, ready, len(executable), reason)
+            refresh_home = getattr(self.transport, "refresh_home", None)
+            if refresh_home is not None:
+                home_valid = bool(refresh_home(home_valid, self.timeout))
+            sync_navigation = getattr(self.transport, "sync_navigation", None)
+            if sync_navigation is not None:
+                sync_navigation(telemetry)
+            ready, reason = self._execution_gate(
+                telemetry,
+                home_valid,
+                now=self.clock(),
+                freshness=self.navigation_freshness,
+            )
+            self.executable_items = executable
+            self.status.verified = True
+            self.status.execution_ready = ready
+            self.status.reason = reason
+            return MissionResult(True, ready, len(executable), reason)
+        except Exception:
+            self.status.verified = False
+            self.status.execution_ready = False
+            self.executable_items = []
+            self._cancel_and_clear()
+            raise
 
     def start_auto(self) -> None:
         if not self.status.verified or not self.status.execution_ready:
@@ -228,6 +395,12 @@ class RoverMissionManager:
                 seq = int(_field(message, "seq", -1))
                 if seq not in by_seq:
                     raise MissionDenied(f"flight controller requested invalid seq={seq}")
+                count = self._sequence_requests.get(seq, 0) + 1
+                self._sequence_requests[seq] = count
+                if count > self.max_sequence_requests:
+                    raise MissionError(
+                        f"mission request limit exceeded seq={seq}"
+                    )
                 self.transport.send("MISSION_ITEM_INT", item=by_seq[seq])
                 attempts = 0
                 continue
@@ -319,9 +492,24 @@ class RoverMissionManager:
                 raise MissionVerificationError(
                     f"readback mismatch seq {wanted.seq}: position"
                 )
+            for name in ("param1", "param2", "param3", "param4"):
+                if abs(getattr(wanted, name) - getattr(received, name)) > self.param_tolerance:
+                    raise MissionVerificationError(
+                        f"readback mismatch seq {wanted.seq}: {name}"
+                    )
+            if wanted.autocontinue != received.autocontinue:
+                raise MissionVerificationError(
+                    f"readback mismatch seq {wanted.seq}: autocontinue"
+                )
 
     @staticmethod
-    def _execution_gate(telemetry, home_valid: bool) -> tuple[bool, str]:
+    def _execution_gate(
+        telemetry,
+        home_valid: bool,
+        *,
+        now: float | None = None,
+        freshness: float = 3.0,
+    ) -> tuple[bool, str]:
         checks = (
             (int(getattr(telemetry, "gps_fix_type", 0)) >= 3, "GPS fix"),
             (int(getattr(telemetry, "satellites_visible", 0)) >= 6, "satellites"),
@@ -334,6 +522,20 @@ class RoverMissionManager:
             ((int(getattr(telemetry, "ekf_flags", 0)) & 0x11) == 0x11, "EKF"),
         )
         missing = [name for ok, name in checks if not ok]
+        generation = int(getattr(telemetry, "connection_generation", 0) or 0)
+        if generation:
+            for label, generation_field, timestamp_field in (
+                ("GPS", "gps_generation", "gps_updated_monotonic"),
+                ("position", "position_generation", "position_updated_monotonic"),
+                ("EKF", "ekf_generation", "ekf_updated_monotonic"),
+                ("Home", "home_generation", "home_updated_monotonic"),
+            ):
+                if int(getattr(telemetry, generation_field, 0) or 0) != generation:
+                    missing.append(f"{label} generation")
+                    continue
+                timestamp = float(getattr(telemetry, timestamp_field, 0.0) or 0.0)
+                if now is None or timestamp <= 0 or now - timestamp > freshness:
+                    missing.append(f"{label} stale")
         return (not missing, "" if not missing else "missing " + ", ".join(missing))
 
     def _recv(self):
@@ -343,9 +545,10 @@ class RoverMissionManager:
         return self._recv_matching(message_types)
 
     def _recv_matching(self, message_types: tuple[str, ...] | None):
-        deadline = time.monotonic() + self.timeout
+        deadline = min(self.clock() + self.timeout, self._operation_deadline)
         while True:
-            remaining = deadline - time.monotonic()
+            self._ensure_operation_budget()
+            remaining = deadline - self.clock()
             if remaining <= 0:
                 return None
             message = self.transport.recv(remaining)
@@ -359,6 +562,33 @@ class RoverMissionManager:
             if message_types is None or _field(message, "type") in message_types:
                 return message
             self.observe(message)
+
+    def _ensure_operation_budget(self):
+        if self.clock() >= self._operation_deadline:
+            raise MissionTimeout("mission operation deadline exceeded")
+
+    def _cancel_and_clear(self):
+        try:
+            self.transport.send(
+                "MISSION_ACK",
+                result=MAV_MISSION_OPERATION_CANCELLED,
+                mission_type=MAV_MISSION_TYPE_MISSION,
+            )
+            self.transport.send("MISSION_CLEAR_ALL")
+            cleanup_deadline = self.clock() + max(1.0, self.timeout)
+            while self.clock() < cleanup_deadline:
+                message = self.transport.recv(cleanup_deadline - self.clock())
+                if message is None:
+                    break
+                if not self._matches_transaction(message):
+                    continue
+                dispatch = getattr(self.transport, "dispatch", None)
+                if dispatch is not None:
+                    dispatch(message)
+                if _field(message, "type") == "MISSION_ACK":
+                    break
+        except Exception:
+            pass
 
     def _matches_transaction(self, message) -> bool:
         mission_type = _optional_field(message, "mission_type")

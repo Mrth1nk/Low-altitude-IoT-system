@@ -1,14 +1,26 @@
 from __future__ import annotations
 
 import glob
+import copy
+import threading
 import time
 
 try:
     from .rover_state import RoverCommand, RoverTelemetry, clamp
-    from .rover_mission import MissionItem, RoverMissionManager
+    from .rover_mission import (
+        MissionError,
+        MissionItem,
+        RoverMissionManager,
+        RoverMissionWorker,
+    )
 except ImportError:
     from rover_state import RoverCommand, RoverTelemetry, clamp
-    from rover_mission import MissionItem, RoverMissionManager
+    from rover_mission import (
+        MissionError,
+        MissionItem,
+        RoverMissionManager,
+        RoverMissionWorker,
+    )
 
 try:
     from pymavlink import mavutil
@@ -55,10 +67,18 @@ class RoverMavlink:
         self.throttle_trim = 1500
         self.throttle_max = 2000
         self.home_valid = False
+        self.connection_generation = 0
+        self.home_updated_monotonic = 0.0
         self.last_home_request = 0.0
         self.mission_manager = None
+        self.session_lock = threading.RLock()
+        self.mission_worker = RoverMissionWorker(self._execute_mission_job)
 
     def connect(self, timeout: float = 2.5) -> bool:
+        with self.session_lock:
+            return self._connect_locked(timeout)
+
+    def _connect_locked(self, timeout: float = 2.5) -> bool:
         if mavutil is None:
             return False
         if self.conn and time.time() - self.last_heartbeat < 5:
@@ -74,6 +94,8 @@ class RoverMavlink:
                     self.target_system = conn.target_system or 1
                     self.target_component = conn.target_component or 0
                     self.last_heartbeat = time.time()
+                    self.home_valid = False
+                    self.home_updated_monotonic = 0.0
                     self.mission_manager = RoverMissionManager(
                         RoverMavlinkTransport(self),
                         vehicle_system=self.target_system,
@@ -94,13 +116,26 @@ class RoverMavlink:
             except Exception:
                 pass
         self.conn = None
+        self.connection_generation += 1
+        self.home_valid = False
+        self.home_updated_monotonic = 0.0
         self.mission_manager = None
 
     def update_telemetry(self, telemetry: RoverTelemetry) -> RoverTelemetry:
+        if not self.session_lock.acquire(blocking=False):
+            telemetry.mission_status = "mission transaction active"
+            return telemetry
+        try:
+            return self._update_telemetry_locked(telemetry)
+        finally:
+            self.session_lock.release()
+
+    def _update_telemetry_locked(self, telemetry: RoverTelemetry) -> RoverTelemetry:
         if not self.connect(timeout=0.2):
             telemetry.fc_link = False
             return telemetry
         telemetry.fc_link = True
+        telemetry.connection_generation = self.connection_generation
         deadline = time.time() + 0.12
         while time.time() < deadline:
             try:
@@ -128,6 +163,8 @@ class RoverMavlink:
                 telemetry.lng = msg.lon / 1e7
                 telemetry.altitude = msg.relative_alt / 1000.0
                 telemetry.heading = int((msg.hdg or 0) / 100)
+                telemetry.position_generation = self.connection_generation
+                telemetry.position_updated_monotonic = time.monotonic()
             elif typ == "VFR_HUD":
                 telemetry.ground_speed = float(msg.groundspeed)
                 telemetry.heading = int(getattr(msg, "heading", telemetry.heading))
@@ -138,13 +175,20 @@ class RoverMavlink:
             elif typ == "GPS_RAW_INT":
                 telemetry.gps_fix_type = int(getattr(msg, "fix_type", 0) or 0)
                 telemetry.satellites_visible = int(getattr(msg, "satellites_visible", 0) or 0)
+                telemetry.gps_generation = self.connection_generation
+                telemetry.gps_updated_monotonic = time.monotonic()
             elif typ == "EKF_STATUS_REPORT":
                 telemetry.ekf_flags = int(getattr(msg, "flags", 0) or 0)
+                telemetry.ekf_generation = self.connection_generation
+                telemetry.ekf_updated_monotonic = time.monotonic()
             elif typ == "HOME_POSITION":
                 self.home_valid = bool(
                     abs(int(getattr(msg, "latitude", 0) or 0)) > 0
                     and abs(int(getattr(msg, "longitude", 0) or 0)) > 0
                 )
+                self.home_updated_monotonic = time.monotonic()
+                telemetry.home_generation = self.connection_generation
+                telemetry.home_updated_monotonic = self.home_updated_monotonic
             elif typ in ("MISSION_CURRENT", "MISSION_ITEM_REACHED"):
                 if self.mission_manager is not None:
                     self.mission_manager.observe(msg)
@@ -156,6 +200,10 @@ class RoverMavlink:
         return telemetry
 
     def apply(self, command: RoverCommand, telemetry: RoverTelemetry) -> tuple[bool, str]:
+        with self.session_lock:
+            return self._apply_locked(command, telemetry)
+
+    def _apply_locked(self, command: RoverCommand, telemetry: RoverTelemetry) -> tuple[bool, str]:
         telemetry.last_command = command.command
         telemetry.control_mode = command.control_mode
         telemetry.target_lat = command.target_lat
@@ -201,19 +249,20 @@ class RoverMavlink:
             return False, str(exc)
 
     def arm(self, arm: bool) -> None:
-        self.conn.mav.command_long_send(
-            self.target_system,
-            self.target_component,
-            mavutil.mavlink.MAV_CMD_COMPONENT_ARM_DISARM,
-            0,
-            1 if arm else 0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-        )
+        with self.session_lock:
+            self.conn.mav.command_long_send(
+                self.target_system,
+                self.target_component,
+                mavutil.mavlink.MAV_CMD_COMPONENT_ARM_DISARM,
+                0,
+                1 if arm else 0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+            )
 
     def safe_arm(self) -> None:
         # Rover may start moving immediately if armed while AUTO has an active mission.
@@ -231,15 +280,26 @@ class RoverMavlink:
         self.stop()
 
     def set_mode(self, mode: str) -> None:
-        mapping = self.conn.mode_mapping() or {}
-        if mode not in mapping:
-            raise RuntimeError(f"mode not available: {mode}")
-        self.conn.set_mode(mapping[mode])
+        with self.session_lock:
+            mapping = self.conn.mode_mapping() or {}
+            if mode not in mapping:
+                raise RuntimeError(f"mode not available: {mode}")
+            self.conn.set_mode(mapping[mode])
 
     def stop(self) -> None:
-        for _ in range(3):
-            self.rc_override(0, 0)
-            time.sleep(0.03)
+        with self.session_lock:
+            for _ in range(3):
+                self.rc_override(0, 0)
+                time.sleep(0.03)
+
+    def try_stop(self) -> bool:
+        if not self.session_lock.acquire(blocking=False):
+            return False
+        try:
+            self.stop()
+            return True
+        finally:
+            self.session_lock.release()
 
     def manual(self, steering: int, throttle: int) -> None:
         for mode in ("MANUAL", "HOLD"):
@@ -251,7 +311,17 @@ class RoverMavlink:
         self.rc_override(steering, throttle)
 
     def neutral(self) -> None:
-        self.rc_override(0, 0)
+        with self.session_lock:
+            self.rc_override(0, 0)
+
+    def try_neutral(self) -> bool:
+        if not self.session_lock.acquire(blocking=False):
+            return False
+        try:
+            self.neutral()
+            return True
+        finally:
+            self.session_lock.release()
 
     def load_rc_params(self) -> None:
         if self.rc_params_loaded:
@@ -295,21 +365,22 @@ class RoverMavlink:
         return int(channel_trim + span * value / 100)
 
     def rc_override(self, steering: int, throttle: int) -> None:
-        steer_pwm = self.scale_rc(steering, self.steer_min, self.steer_trim, self.steer_max)
-        throttle_pwm = self.scale_rc(throttle, self.throttle_min, self.throttle_trim, self.throttle_max)
-        ignore = 65535
-        self.conn.mav.rc_channels_override_send(
-            self.target_system,
-            self.target_component,
-            steer_pwm,
-            ignore,
-            throttle_pwm,
-            ignore,
-            ignore,
-            ignore,
-            ignore,
-            ignore,
-        )
+        with self.session_lock:
+            steer_pwm = self.scale_rc(steering, self.steer_min, self.steer_trim, self.steer_max)
+            throttle_pwm = self.scale_rc(throttle, self.throttle_min, self.throttle_trim, self.throttle_max)
+            ignore = 65535
+            self.conn.mav.rc_channels_override_send(
+                self.target_system,
+                self.target_component,
+                steer_pwm,
+                ignore,
+                throttle_pwm,
+                ignore,
+                ignore,
+                ignore,
+                ignore,
+                ignore,
+            )
 
     def goto(self, lat: float, lng: float, speed: float) -> None:
         try:
@@ -368,6 +439,42 @@ class RoverMavlink:
         return self.mission_manager.upload_and_verify(
             items, telemetry, home_valid=self.home_valid
         )
+
+    def queue_mission(
+        self, command_id: str, raw_items: list[dict], telemetry: RoverTelemetry
+    ):
+        if len(raw_items) > 100:
+            raise ValueError("mission exceeds maximum 100 executable items")
+        items = [
+            MissionItem.from_payload(item, seq=index)
+            for index, item in enumerate(raw_items, 1)
+        ]
+        return self.mission_worker.submit(
+            str(command_id),
+            items,
+            copy.deepcopy(telemetry),
+            self.home_valid,
+        )
+
+    def drain_mission_results(self):
+        return self.mission_worker.drain_completed()
+
+    def _execute_mission_job(self, job, progress):
+        with self.session_lock:
+            if not self.connect(timeout=0.5):
+                raise MissionError("flight controller not connected")
+            if self.mission_manager is None:
+                self.mission_manager = RoverMissionManager(
+                    RoverMavlinkTransport(self),
+                    vehicle_system=self.target_system,
+                    vehicle_component=self.target_component,
+                )
+            return self.mission_manager.upload_and_verify(
+                job.items,
+                job.telemetry,
+                home_valid=self.home_valid,
+                progress=progress,
+            )
 
 
 class RoverMavlinkTransport:
@@ -529,3 +636,11 @@ class RoverMavlinkTransport:
         self.rover.home_valid = bool(
             abs(int(latitude or 0)) > 0 and abs(int(longitude or 0)) > 0
         )
+        if self.rover.home_valid:
+            self.rover.home_updated_monotonic = self.clock()
+
+    def sync_navigation(self, telemetry) -> None:
+        telemetry.connection_generation = self.rover.connection_generation
+        if self.rover.home_valid:
+            telemetry.home_generation = self.rover.connection_generation
+            telemetry.home_updated_monotonic = self.rover.home_updated_monotonic

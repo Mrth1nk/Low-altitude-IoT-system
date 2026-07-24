@@ -14,7 +14,13 @@ from aircraft_transport import AircraftTransport, legacy_gateway_ports
 from command_router import CloudCommand, CommandRejected, CommandRouter
 from l610 import check_l610, ensure_l610_usbnet, read_lte_rssi
 from mavlink_rover import RoverMavlink, discover_mavlink_urls
-from rover_state import RoverCommand, RoverTelemetry, record_command_receipt
+from rover_state import (
+    RoverCommand,
+    RoverTelemetry,
+    apply_rover_mission_status,
+    record_command_receipt,
+)
+from rover_mission import MissionError
 from tuya_auth import build_tuya_credentials, make_topic
 
 CONFIG_PATH = Path.home() / "uav_tuya_agent" / "config.json"
@@ -209,18 +215,14 @@ def run_agent(config: dict) -> int:
                 items = command.payload.get("items")
                 if not isinstance(items, list):
                     raise ValueError("rover mission requires items")
-                result = rover.upload_mission(items, telemetry)
-                telemetry.mission_status = (
-                    "verified ready"
-                    if result.execution_ready
-                    else f"verified not ready: {result.reason}"
+                status = rover.queue_mission(
+                    str(command.command_id), items, telemetry
                 )
+                telemetry.mission_status = "mission queued"
                 return {
                     "accepted": True,
-                    "stage": "verified",
+                    "stage": status.stage,
                     "message": telemetry.mission_status,
-                    "verified": result.verified,
-                    "execution_ready": result.execution_ready,
                 }
             rover_command = RoverCommand.from_dict(
                 {"command": command.action, **command.payload},
@@ -282,7 +284,7 @@ def run_agent(config: dict) -> int:
                     result = router.route(command)
                     ok = bool(result.get("accepted", True))
                     message = str(result.get("message", result.get("stage", "routed")))
-                except (CommandRejected, TypeError, ValueError) as exc:
+                except (CommandRejected, MissionError, TypeError, ValueError) as exc:
                     ok, message = False, str(exc)
                     result = {"stage": "rejected"}
                 telemetry.last_command = (
@@ -311,11 +313,19 @@ def run_agent(config: dict) -> int:
                 )
             transaction = aircraft_transport.pump(time.monotonic())
             telemetry.apply_aircraft_transaction(transaction)
+            for mission_status in rover.drain_mission_results():
+                receipt = apply_rover_mission_status(telemetry, mission_status)
+                print(
+                    "rover mission result "
+                    f"id={receipt['command_id']} stage={receipt['stage']} "
+                    f"error={receipt['error_type']} message={receipt['message']}",
+                    flush=True,
+                )
             if telemetry.last_command in ("stop", "arm") and rover.connect(timeout=0.05):
-                rover.neutral()
+                rover.try_neutral()
             if telemetry.last_command in ("manual", "drive") and (telemetry.steering or telemetry.throttle) and time.time() > manual_active_until:
                 if rover.connect(timeout=0.05):
-                    rover.stop()
+                    rover.try_stop()
                 telemetry.steering = 0
                 telemetry.throttle = 0
                 telemetry.control_mode = "standby"
