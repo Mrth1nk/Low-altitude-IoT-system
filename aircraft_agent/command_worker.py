@@ -104,7 +104,8 @@ class AircraftCommandWorker:
 
     def _execute(self, record):
         if record["kind"] == "mission":
-            return self.operations.execute(record, start_auto=True)
+            # Mission upload and AUTO execution are separate operator actions.
+            return self.operations.execute(record, start_auto=False)
         action = str(record["action"]).lower()
         if action == "arm":
             return self.operations.arm(True)

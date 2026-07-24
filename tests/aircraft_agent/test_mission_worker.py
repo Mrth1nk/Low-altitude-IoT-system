@@ -395,7 +395,9 @@ class AircraftCommandWorkerTests(unittest.TestCase):
                 self.calls.append(("arm", value))
 
             def execute(self, record, start_auto=True):
-                self.calls.append(("mission", record["mission_id"]))
+                self.calls.append(
+                    ("mission", record["mission_id"], bool(start_auto))
+                )
                 return type(
                     "Result",
                     (),
@@ -411,7 +413,11 @@ class AircraftCommandWorkerTests(unittest.TestCase):
 
         self.assertEqual(
             operations.calls,
-            [("mode", "GUIDED"), ("arm", True), ("mission", "m1")],
+            [
+                ("mode", "GUIDED"),
+                ("arm", True),
+                ("mission", "m1", False),
+            ],
         )
 
 
