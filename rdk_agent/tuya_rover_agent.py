@@ -2,14 +2,14 @@
 import argparse
 import json
 import ssl
-import threading
 import time
 from pathlib import Path
 
 import paho.mqtt.client as mqtt
 
 from aircraft_gateway import start_aircraft_gateway
-from aircraft_commands import send_aircraft_command
+from aircraft_link import AircraftLink
+from command_router import CloudCommand, CommandRejected, CommandRouter
 from l610 import check_l610, ensure_l610_usbnet, read_lte_rssi
 from mavlink_rover import RoverMavlink, discover_mavlink_urls
 from rover_state import RoverCommand, RoverTelemetry
@@ -56,7 +56,12 @@ def extract_property_set(payload: bytes) -> dict:
     except Exception:
         return {}
     data = doc.get("data", doc.get("payload", {}).get("data", {}))
-    return data if isinstance(data, dict) else {}
+    if not isinstance(data, dict):
+        return {}
+    result = dict(data)
+    if "source_timestamp" not in result and doc.get("time") is not None:
+        result["source_timestamp"] = doc["time"]
+    return result
 
 
 def append_local_command(command_path: Path, command: RoverCommand) -> None:
@@ -65,7 +70,7 @@ def append_local_command(command_path: Path, command: RoverCommand) -> None:
         f.write(json.dumps(command.__dict__, separators=(",", ":")) + "\n")
 
 
-def consume_local_commands(command_path: Path) -> list[RoverCommand]:
+def consume_local_commands(command_path: Path) -> list[CloudCommand]:
     if not command_path.exists():
         return []
     lines = command_path.read_text().splitlines()
@@ -75,7 +80,9 @@ def consume_local_commands(command_path: Path) -> list[RoverCommand]:
         if not line.strip():
             continue
         try:
-            commands.append(RoverCommand.from_dict(json.loads(line), source="ground_station"))
+            commands.append(
+                CloudCommand.from_cloud(json.loads(line), source="ground_station")
+            )
         except Exception:
             continue
     return commands
@@ -131,6 +138,29 @@ def read_aircraft_summary(path: Path = AIRCRAFT_STATE_PATH) -> dict:
     }
 
 
+def read_optical_state(path: Path = AIRCRAFT_STATE_PATH) -> str:
+    try:
+        doc = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return "blocked"
+    explicit = str(
+        doc.get("optical_state", doc.get("link_state", ""))
+    ).strip().lower()
+    if explicit in ("locked", "blocked"):
+        return explicit
+    messages = doc.get("messages") if isinstance(doc.get("messages"), list) else []
+    for item in reversed(messages[-6:]):
+        if not isinstance(item, dict):
+            continue
+        text = (
+            str(item.get("type", "")) + " " + str(item.get("text", ""))
+        ).upper()
+        if "LINK_BLOCKED" in text or "SIGNAL_INTERRUPTED" in text:
+            return "blocked"
+    updated_at = float(doc.get("updated_at", 0) or 0)
+    return "locked" if updated_at and time.time() - updated_at < 3 else "blocked"
+
+
 def start_aircraft_state_gateway(config: dict):
     ports = config.get("aircraft_udp_ports", [14560, 14550])
     if isinstance(ports, str):
@@ -155,44 +185,33 @@ def run_agent(config: dict) -> int:
     command_path = Path(config["command_path"])
     aircraft_gateway = start_aircraft_state_gateway(config)
     connected = False
-    pending: list[RoverCommand] = []
+    pending: list[CloudCommand] = []
     manual_active_until = 0.0
-    aircraft_job_lock = threading.Lock()
-    aircraft_job_running = False
+    aircraft_link = AircraftLink(
+        max_attempts=int(config.get("aircraft_max_attempts", 4)),
+        retry_interval=float(config.get("aircraft_retry_interval_sec", 0.5)),
+    )
 
-    def start_aircraft_job(command: RoverCommand) -> tuple[bool, str]:
-        nonlocal aircraft_job_running
-        with aircraft_job_lock:
-            if aircraft_job_running:
-                return False, "aircraft mission upload already running"
-            aircraft_job_running = True
+    class RoverExecutor:
+        def execute(self, command):
+            rover_command = RoverCommand.from_dict(
+                {"command": command.action, **command.payload},
+                source="command_router",
+            )
+            ok, message = rover.apply(rover_command, telemetry)
+            return {
+                "accepted": ok,
+                "stage": "executed" if ok else "failed",
+                "message": message,
+                "rover_command": rover_command,
+            }
 
-        def worker() -> None:
-            nonlocal aircraft_job_running
-            try:
-                message = send_aircraft_command(
-                    command.command,
-                    AIRCRAFT_STATE_PATH,
-                    target_lat=command.target_lat,
-                    target_lng=command.target_lng,
-                    target_alt=command.target_speed,
-                )
-                with aircraft_job_lock:
-                    telemetry.mission_status = message
-                    telemetry.fault_text = ""
-                print(f"applied aircraft command async ok=True message={message}", flush=True)
-            except Exception as exc:
-                message = str(exc)
-                with aircraft_job_lock:
-                    telemetry.mission_status = "command_failed"
-                    telemetry.fault_text = message
-                print(f"applied aircraft command async ok=False message={message}", flush=True)
-            finally:
-                with aircraft_job_lock:
-                    aircraft_job_running = False
-
-        threading.Thread(target=worker, daemon=True).start()
-        return True, "aircraft mission upload started"
+    router = CommandRouter(
+        RoverExecutor(),
+        aircraft_link,
+        optical_state=lambda: read_optical_state(AIRCRAFT_STATE_PATH),
+        max_age_seconds=float(config.get("command_max_age_sec", 10.0)),
+    )
 
     def on_connect(client, userdata, flags, rc, properties=None):
         nonlocal connected
@@ -211,7 +230,7 @@ def run_agent(config: dict) -> int:
             print(f"property report response {msg.payload.decode(errors='ignore')}", flush=True)
             return
         data = extract_property_set(msg.payload)
-        command = RoverCommand.from_tuya_data(data)
+        command = CloudCommand.from_cloud(data)
         pending.append(command)
         print(f"cloud command {command}")
 
@@ -231,39 +250,34 @@ def run_agent(config: dict) -> int:
                 pending.append(command)
             while pending:
                 command = pending.pop(0)
-                if command.command.startswith("aircraft_"):
-                    if command.command in ("aircraft_goto", "aircraft_goto_test_home"):
-                        ok, message = start_aircraft_job(command)
-                        telemetry.last_command = command.command
-                        telemetry.mission_status = message if ok else "command_failed"
-                        telemetry.fault_text = "" if ok else message
-                        print(f"queued aircraft command ok={ok} message={message}", flush=True)
-                        continue
-                    try:
-                        message = send_aircraft_command(
-                            command.command,
-                            AIRCRAFT_STATE_PATH,
-                            target_lat=command.target_lat,
-                            target_lng=command.target_lng,
-                            target_alt=command.target_speed,
-                        )
-                        ok = True
-                    except Exception as exc:
-                        message = str(exc)
-                        ok = False
-                    telemetry.last_command = command.command
-                    telemetry.mission_status = message if ok else "command_failed"
-                    telemetry.fault_text = "" if ok else message
-                    print(f"applied aircraft command ok={ok} message={message}", flush=True)
-                    continue
-                ok, message = rover.apply(command, telemetry)
+                try:
+                    result = router.route(command)
+                    ok = bool(result.get("accepted", True))
+                    message = str(result.get("message", result.get("stage", "routed")))
+                except (CommandRejected, TypeError, ValueError) as exc:
+                    ok, message = False, str(exc)
+                    result = {"stage": "rejected"}
+                telemetry.last_command = (
+                    f"aircraft_{command.action}"
+                    if command.target == "aircraft"
+                    else command.action
+                )
                 telemetry.mission_status = message if ok else "command_failed"
                 telemetry.fault_text = "" if ok else message
-                if ok and command.command in ("manual", "drive") and (command.steering or command.throttle):
+                telemetry.transaction_stage = str(result.get("stage", "unknown"))
+                telemetry.transaction_id = str(command.command_id)
+                telemetry.transaction_pending = aircraft_link.pending_count
+                rover_command = result.get("rover_command")
+                if ok and rover_command and rover_command.command in ("manual", "drive") and (rover_command.steering or rover_command.throttle):
                     manual_active_until = time.time() + 1.8
-                if ok and command.command in ("stop", "hold", "brake", "arm"):
+                if ok and rover_command and rover_command.command in ("stop", "hold", "brake", "arm"):
                     manual_active_until = 0.0
-                print(f"applied command ok={ok} message={message}", flush=True)
+                print(
+                    f"routed command id={command.command_id} target={command.target} "
+                    f"action={command.action} ok={ok} stage={result.get('stage')} "
+                    f"message={message}",
+                    flush=True,
+                )
             if telemetry.last_command in ("stop", "arm") and rover.connect(timeout=0.05):
                 rover.neutral()
             if telemetry.last_command in ("manual", "drive") and (telemetry.steering or telemetry.throttle) and time.time() > manual_active_until:

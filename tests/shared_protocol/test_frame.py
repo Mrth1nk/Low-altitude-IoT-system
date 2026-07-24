@@ -143,6 +143,76 @@ class FrameTests(unittest.TestCase):
 
 
 class TypedPayloadTests(unittest.TestCase):
+    def test_accepts_checksum_and_bounded_mavlink_mission_fields(self):
+        checksum = "a" * 64
+        valid = {
+            MessageType.MISSION_BEGIN: {
+                "mission_id": "demo",
+                "item_count": 1,
+                "vehicle": "aircraft",
+                "checksum": checksum,
+            },
+            MessageType.MISSION_ITEM: {
+                "mission_id": "demo",
+                "index": 0,
+                "lat": 32.1,
+                "lon": 118.9,
+                "alt": 20.0,
+                "command": 16,
+                "frame": 6,
+                "param1": 0.0,
+                "param2": 2.0,
+                "param3": 0.0,
+                "param4": 0.0,
+                "autocontinue": True,
+            },
+            MessageType.MISSION_COMMIT: {
+                "mission_id": "demo",
+                "item_count": 1,
+                "checksum": checksum,
+            },
+        }
+
+        for message_type, payload in valid.items():
+            with self.subTest(message_type=message_type):
+                self.assertEqual(validate_payload(message_type, payload), payload)
+
+    def test_rejects_invalid_checksum_and_mavlink_field_bounds(self):
+        invalid = [
+            (
+                MessageType.MISSION_BEGIN,
+                {
+                    "mission_id": "m",
+                    "item_count": 1,
+                    "vehicle": "aircraft",
+                    "checksum": "not-sha256",
+                },
+            ),
+            (
+                MessageType.MISSION_ITEM,
+                {
+                    "mission_id": "m",
+                    "index": 0,
+                    "lat": 0.0,
+                    "lon": 0.0,
+                    "alt": 1.0,
+                    "command": 70000,
+                    "frame": 6,
+                    "param1": 0.0,
+                    "param2": 0.0,
+                    "param3": 0.0,
+                    "param4": 0.0,
+                    "autocontinue": True,
+                },
+            ),
+        ]
+
+        for message_type, payload in invalid:
+            with self.subTest(message_type=message_type), self.assertRaises(
+                (TypeError, ValueError)
+            ):
+                validate_payload(message_type, payload)
+
     def test_accepts_all_required_message_payloads(self):
         valid = {
             MessageType.COMMAND: {"action": "arm", "parameters": {}},

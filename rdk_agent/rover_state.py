@@ -33,6 +33,9 @@ def compact_json_bytes(data: dict[str, Any], max_bytes: int = 480) -> str:
             "gps_fix_type",
             "satellites_visible",
             "mission_status",
+            "tx_stage",
+            "tx_id",
+            "tx_pending",
             "last_command",
             "aircraft_link",
             "aircraft_age",
@@ -122,6 +125,9 @@ def compact_json_bytes(data: dict[str, Any], max_bytes: int = 480) -> str:
         "gps_fix_type",
         "satellites_visible",
         "mission_status",
+        "tx_stage",
+        "tx_id",
+        "tx_pending",
         "steering",
         "throttle",
         "last_command",
@@ -165,10 +171,13 @@ class RoverTelemetry:
     throttle: int = 0
     last_command: str = "none"
     fault_text: str = ""
+    transaction_stage: str = "idle"
+    transaction_id: str = ""
+    transaction_pending: int = 0
     updated_at: float = field(default_factory=time.time)
 
     def data(self) -> dict[str, Any]:
-        return {
+        data = {
             "lat": round(float(self.lat), 7),
             "lng": round(float(self.lng), 7),
             "altitude": round(float(self.altitude), 2),
@@ -193,6 +202,19 @@ class RoverTelemetry:
             "last_command": str(self.last_command)[:64],
             "fault_text": str(self.fault_text)[:255],
         }
+        if (
+            self.transaction_stage != "idle"
+            or self.transaction_id
+            or self.transaction_pending
+        ):
+            data.update(
+                {
+                    "tx_stage": str(self.transaction_stage)[:24],
+                    "tx_id": str(self.transaction_id)[:36],
+                    "tx_pending": int(clamp(self.transaction_pending, 0, 999)),
+                }
+            )
+        return data
 
     def tuya_report_payload(self) -> dict:
         now_ms = int(time.time() * 1000)
