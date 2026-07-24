@@ -2,6 +2,12 @@ const crypto = require("crypto");
 const fs = require("fs");
 const http = require("http");
 const path = require("path");
+const {
+  aircraftCommandsAllowed,
+  filterCommandProperties,
+  isAircraftCommand,
+  normalizeCloudState,
+} = require("./public/core.js");
 
 const PORT = Number(process.env.PORT || 5178);
 const HOST = process.env.HOST || "0.0.0.0";
@@ -9,10 +15,12 @@ const TUYA_HOST = process.env.TUYA_HOST || "https://openapi.tuyacn.com";
 const DEVICE_ID = process.env.TUYA_DEVICE_ID || "262c1deefdc2650445bwpd";
 const ACCESS_ID = process.env.TUYA_ACCESS_ID || "";
 const ACCESS_SECRET = process.env.TUYA_ACCESS_SECRET || "";
+const FAKE_TUYA = process.env.TUYA_FAKE === "1";
 const PUBLIC_DIR = path.join(__dirname, "public");
-const COMMAND_PROPERTY_CODES = new Set(["command", "target_lat", "target_lng", "target_speed", "steering", "throttle"]);
 
 let cachedToken = null;
+let lastState = null;
+let fakeRevision = 0;
 
 function sha256(value) {
   return crypto.createHash("sha256").update(value).digest("hex");
@@ -98,33 +106,14 @@ async function getToken() {
 }
 
 function normalizeStatus(result) {
-  const byCode = {};
-  const list = Array.isArray(result)
-    ? result
-    : Array.isArray(result?.properties)
-      ? result.properties
-      : [];
-  for (const item of list) {
-    const code = item.code || item.dp_id || item.name;
-    if (code) byCode[code] = item.value;
-  }
-  let rover = {};
-  if (typeof byCode.rover_state === "string") {
-    try {
-      rover = JSON.parse(byCode.rover_state);
-    } catch {
-      rover = {raw_rover_state: byCode.rover_state};
-    }
-  }
-  return {
-    online: true,
-    updated_at: Date.now() / 1000,
-    telemetry: rover,
-    raw: byCode,
-  };
+  return normalizeCloudState(result);
 }
 
 async function fetchState() {
+  if (FAKE_TUYA) {
+    lastState = fakeState();
+    return lastState;
+  }
   const endpoints = [
     {
       path: `/v2.0/cloud/thing/${DEVICE_ID}/shadow/properties`,
@@ -146,6 +135,7 @@ async function fetchState() {
       const doc = await tuyaRequestWithToken("GET", endpoint.path, null);
       const state = normalizeStatus(endpoint.pick(doc));
       state.source = endpoint.path;
+      lastState = state;
       return state;
     } catch (err) {
       errors.push({path: endpoint.path, error: err.message, detail: err.response || null});
@@ -158,11 +148,61 @@ async function fetchState() {
 }
 
 async function sendCommand(command) {
-  const properties = {};
-  for (const [code, value] of Object.entries(command)) {
-    if (COMMAND_PROPERTY_CODES.has(code) && value !== undefined && value !== null && value !== "") properties[code] = value;
+  const properties = filterCommandProperties(command);
+  if (!Object.keys(properties).length) {
+    throw new Error("没有可下发的涂鸦属性");
+  }
+  if (isAircraftCommand(properties) && lastState && !aircraftCommandsAllowed(lastState)) {
+    throw new Error("OPTICAL LINK BLOCKED");
+  }
+  if (FAKE_TUYA) {
+    fakeRevision += 1;
+    return {success: true, fake: true, revision: fakeRevision, properties};
   }
   return tuyaRequestWithToken("POST", `/v2.0/cloud/thing/${DEVICE_ID}/shadow/properties/issue`, {properties});
+}
+
+function fakeState() {
+  const now = Date.now() / 1000;
+  const offset = (fakeRevision % 8) * 0.000015;
+  return normalizeCloudState([
+    {
+      code: "rover_state",
+      value: JSON.stringify({
+        lat: 32.11956 + offset,
+        lng: 118.958406 + offset,
+        ground_speed: fakeRevision ? 0.7 : 0,
+        heading: 86,
+        battery_percent: 82,
+        armed: false,
+        flight_mode: "HOLD",
+        lte_rssi: -61,
+        fc_link: true,
+        gps_fix_type: 3,
+        satellites_visible: 12,
+        mission_status: fakeRevision ? "mission active seq=2" : "idle",
+        rover_tx_stage: fakeRevision ? "verified" : "idle",
+        optical_state: "locked",
+        aircraft_tx_stage: fakeRevision ? "VERIFIED" : "idle",
+        aircraft_mission_status: fakeRevision ? "execution_ready" : "idle",
+        aircraft: {
+          link_active: true,
+          mode: "GUIDED",
+          armed: false,
+          battery_percent: 76,
+          lat: 32.11961,
+          lng: 118.95847,
+          altitude: 18.2,
+          ground_speed: 0.3,
+          messages: [
+            {time: now - 2, sequence: fakeRevision * 2, type: "HEARTBEAT", text: "GUIDED armed=NO"},
+            {time: now, sequence: fakeRevision * 2 + 1, type: "STATUS", text: "optical target locked"},
+          ],
+        },
+      }),
+    },
+    {code: "command", value: "noop"},
+  ]);
 }
 
 async function createSpace(name) {
@@ -207,7 +247,8 @@ function serveStatic(req, res) {
   fs.createReadStream(filePath).pipe(res);
 }
 
-const server = http.createServer(async (req, res) => {
+function createServer() {
+  return http.createServer(async (req, res) => {
   try {
     if (req.url.startsWith("/api/state")) {
       sendJson(res, 200, await fetchState());
@@ -268,8 +309,24 @@ const server = http.createServer(async (req, res) => {
   } catch (err) {
     sendJson(res, 500, {ok: false, error: err.message, detail: err.response || null});
   }
-});
+  });
+}
 
-server.listen(PORT, HOST, () => {
-  console.log(`Tuya cloud ground station: http://127.0.0.1:${PORT}/`);
-});
+function startServer() {
+  const server = createServer();
+  server.listen(PORT, HOST, () => {
+    console.log(`Tuya cloud ground station: http://127.0.0.1:${PORT}/`);
+  });
+  return server;
+}
+
+if (require.main === module) startServer();
+
+module.exports = {
+  createServer,
+  fetchState,
+  normalizeStatus,
+  sendCommand,
+  signHeaders,
+  startServer,
+};

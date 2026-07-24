@@ -3,82 +3,85 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Tuya Rover Ground Station</title>
+  <title>低空配送物联网地面站</title>
   <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
   <link rel="stylesheet" href="/style.css">
 </head>
 <body>
-  <header>
+  <header class="topbar">
     <div>
-      <h1>Tuya Rover Ground Station</h1>
-      <p>RDK · L610 · Tuya Cloud · Air Link</p>
+      <h1>低空配送物联网地面站</h1>
+      <p>Tuya Cloud · Rover · Aircraft</p>
     </div>
-    <button id="refreshBtn">刷新</button>
+    <div class="cloud-state"><span id="cloudDot"></span><strong id="cloudText">同步中</strong><button id="refreshBtn" title="刷新">刷新</button></div>
   </header>
-  <div id="taskBanner" class="task-banner">
+  <div id="taskBanner" class="task-banner idle">
     <strong id="taskBannerTitle">待命</strong>
-    <span id="taskBannerDetail">等待涂鸦云状态同步</span>
+    <span id="taskBannerDetail">等待涂鸦云状态</span>
   </div>
-  <main>
-    <div class="rover-column">
-      <section class="map-section">
-        <h2>小车地图与航点</h2>
-        <div class="waypoint-mode">
-          <button id="roverWaypointMode" class="mode-option active" type="button">小车航点</button>
-          <button id="aircraftWaypointMode" class="mode-option" type="button">飞机航点</button>
-          <label class="test-home-toggle"><input id="aircraftTestHome" type="checkbox" disabled> 测试Home</label>
+
+  <main class="workspace">
+    <section class="vehicle-panel rover-panel">
+      <div class="section-heading">
+        <div><span class="eyebrow">ROVER</span><h2>小车任务</h2></div>
+        <div class="mode-switch" role="group" aria-label="地图任务类型">
+          <button id="roverWaypointMode" class="active" type="button">小车</button>
+          <button id="aircraftWaypointMode" type="button">飞机</button>
         </div>
+      </div>
+
+      <div class="map-wrap">
         <div id="map"></div>
-        <div class="waypoint">
-          <input id="latInput" inputmode="decimal" placeholder="纬度">
-          <input id="lngInput" inputmode="decimal" placeholder="经度">
-          <input id="speedInput" inputmode="decimal" placeholder="速度 m/s" value="0.5">
-          <button id="sendWaypointBtn">发送航点</button>
-        </div>
-        <div class="map-tools">
-          <button id="queueWaypointBtn" class="secondary">加入队列</button>
-          <button id="sendNextWaypointBtn" class="secondary">发送下一个</button>
-          <button id="clearWaypointQueueBtn" class="secondary">清空队列</button>
-          <label class="fence-toggle"><input id="geofenceEnabled" type="checkbox"> 电子围栏</label>
-          <input id="geofenceRadius" inputmode="decimal" value="50" placeholder="围栏半径 m">
-        </div>
-        <div id="waypointQueue" class="queue-list"></div>
-      </section>
-      <section>
-        <h2>小车状态</h2>
-        <div id="statusGrid" class="grid rover-grid"></div>
-        <div class="commands">
-          <button data-command="arm">解锁</button>
-          <button data-command="disarm">上锁</button>
-          <button data-command="manual">MANUAL</button>
-          <button data-command="guided">GUIDED</button>
-          <button data-command="auto">AUTO</button>
-          <button data-command="hold">HOLD</button>
-        </div>
-      </section>
-      <section>
-        <h2>小车遥控</h2>
-        <div class="drive">
-          <button data-steering="0" data-throttle="100">前进</button>
-          <button data-steering="-75" data-throttle="95">左前</button>
-          <button data-steering="75" data-throttle="95">右前</button>
-          <button data-steering="-100" data-throttle="0">左转</button>
-          <button data-steering="100" data-throttle="0">右转</button>
-          <button data-steering="0" data-throttle="-100">后退</button>
-        </div>
-      </section>
-      <section>
-        <h2>日志</h2>
-        <pre id="log"></pre>
-      </section>
-    </div>
-    <aside class="aircraft-column">
-      <section>
-        <h2>飞机消息</h2>
-        <p>从涂鸦云 rover_state 同步，时间为消息收到/变化时刻。</p>
-        <div id="aircraftAlert" class="inline-alert" hidden></div>
-        <div id="aircraftGrid" class="grid aircraft-grid"></div>
-        <div class="aircraftCommands">
+        <div class="map-legend"><span class="rover-line">小车</span><span class="aircraft-line">飞机</span></div>
+      </div>
+
+      <div class="mission-editor">
+        <input id="latInput" inputmode="decimal" aria-label="纬度" placeholder="纬度">
+        <input id="lngInput" inputmode="decimal" aria-label="经度" placeholder="经度">
+        <input id="speedInput" inputmode="decimal" aria-label="速度" value="0.8" placeholder="速度 m/s">
+        <input id="altitudeInput" inputmode="decimal" aria-label="统一高度" value="20" placeholder="统一高度 m" hidden>
+        <button id="queueWaypointBtn" class="secondary">加入队列</button>
+        <button id="clearWaypointQueueBtn" class="icon-command secondary" title="清空当前任务">清空</button>
+      </div>
+      <div class="mission-actions">
+        <button id="uploadMissionBtn">上传小车任务</button>
+        <span id="queueSummary">0 个航点</span>
+        <label class="fence-control"><input id="geofenceEnabled" type="checkbox"> 围栏 <input id="geofenceRadius" inputmode="decimal" value="50" aria-label="围栏半径"><span>m</span></label>
+      </div>
+      <div id="waypointQueue" class="queue-list" aria-live="polite"></div>
+
+      <div class="status-block">
+        <div id="statusGrid" class="metric-grid"></div>
+        <div id="roverTimeline" class="timeline"></div>
+      </div>
+      <div class="commands rover-commands">
+        <button data-command="arm">解锁</button>
+        <button data-command="disarm">上锁</button>
+        <button data-command="manual">MANUAL</button>
+        <button data-command="guided">GUIDED</button>
+        <button data-command="auto">AUTO</button>
+        <button data-command="hold">HOLD</button>
+      </div>
+      <div class="drive" aria-label="小车遥控">
+        <button data-steering="-75" data-throttle="95">左前</button>
+        <button data-steering="0" data-throttle="100">前进</button>
+        <button data-steering="75" data-throttle="95">右前</button>
+        <button data-steering="-100" data-throttle="0">左转</button>
+        <button data-steering="0" data-throttle="-100">后退</button>
+        <button data-steering="100" data-throttle="0">右转</button>
+      </div>
+    </section>
+
+    <section class="vehicle-panel aircraft-panel">
+      <div class="section-heading">
+        <div><span class="eyebrow">AIRCRAFT</span><h2>飞机任务</h2></div>
+        <span id="opticalBadge" class="badge">等待状态</span>
+      </div>
+      <div id="opticalBlocked" class="optical-blocked" hidden>OPTICAL LINK BLOCKED</div>
+      <div id="aircraftContent">
+        <div id="aircraftGrid" class="metric-grid aircraft-metrics"></div>
+        <div id="aircraftTimeline" class="timeline"></div>
+        <div class="commands aircraft-commands">
           <button data-aircraft-command="aircraft_guided">GUIDED</button>
           <button data-aircraft-command="aircraft_loiter">LOITER</button>
           <button data-aircraft-command="aircraft_auto">AUTO</button>
@@ -86,20 +89,27 @@
           <button data-aircraft-command="aircraft_arm">ARM</button>
           <button class="danger" data-aircraft-command="aircraft_disarm">DISARM</button>
         </div>
-        <div id="aircraftMessages" class="messages"></div>
-      </section>
-    </aside>
+        <div class="message-heading"><h3>飞机消息</h3><span>消息到达时刻</span></div>
+        <div id="aircraftMessages" class="messages" aria-live="polite"></div>
+      </div>
+      <div class="event-log">
+        <div class="message-heading"><h3>云端操作</h3><button id="clearLogBtn" class="text-button">清空</button></div>
+        <pre id="log"></pre>
+      </div>
+    </section>
   </main>
+
   <div id="toastHost" class="toast-host"></div>
   <div id="arrivalModal" class="modal" hidden>
     <div class="modal-backdrop"></div>
     <section class="modal-window">
-      <h2>已到达目标航点</h2>
+      <h2>小车已到达任务终点</h2>
       <div id="arrivalSummary" class="arrival-summary"></div>
-      <button id="closeArrivalModal">知道了</button>
+      <button id="closeArrivalModal">确认</button>
     </section>
   </div>
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <script src="/core.js"></script>
   <script src="/app.js"></script>
 </body>
 </html>
