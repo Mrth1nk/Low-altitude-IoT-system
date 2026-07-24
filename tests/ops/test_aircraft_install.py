@@ -259,6 +259,9 @@ class AircraftInstallerTests(unittest.TestCase):
         self.assertIn("restore_legacy_services", source)
         self.assertIn("health_aircraft.sh", source)
         self.assertIn("source \"$env_file\"", source)
+        self.assertNotIn('cp -a "$BACKUP_DIR/root/." "$(dest /)"', source)
+        self.assertIn('for top_level in "$BACKUP_DIR/root"/*', source)
+        self.assertIn("HEALTH_ATTEMPTS", source)
         self.assertIn("mktemp", source)
         self.assertIn("mv -f", source)
 

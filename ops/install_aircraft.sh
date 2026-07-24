@@ -52,7 +52,11 @@ rollback() {
       "$(dest /etc/systemd/system/low-altitude-vision.service)" \
       "$(dest /etc/logrotate.d/low-altitude-aircraft)"
     if [[ -n "$BACKUP_DIR" && -d "$BACKUP_DIR/root" ]]; then
-      cp -a "$BACKUP_DIR/root/." "$(dest /)"
+      # Restore backed-up top-level trees without copying the backup root
+      # directory metadata onto `/`.
+      for top_level in "$BACKUP_DIR/root"/*; do
+        [[ -e "$top_level" ]] && cp -a "$top_level" "$(dest /)"
+      done
       systemctl daemon-reload || true
     fi
     restore_legacy_services || true
@@ -167,7 +171,19 @@ else
   # The file is root-owned mode 0600 and was validated during preflight.
   source "$env_file"
   set +a
-  "$(dest /usr/local/lib/low-altitude-iot/health_aircraft.sh)"
+  HEALTH_ATTEMPTS="${HEALTH_ATTEMPTS:-30}"
+  health_ok=0
+  for ((attempt = 1; attempt <= HEALTH_ATTEMPTS; attempt++)); do
+    if "$(dest /usr/local/lib/low-altitude-iot/health_aircraft.sh)"; then
+      health_ok=1
+      break
+    fi
+    sleep 1
+  done
+  ((health_ok)) || {
+    echo "aircraft health did not become ready" >&2
+    false
+  }
 fi
 
 COMMITTED=1
