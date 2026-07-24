@@ -84,10 +84,35 @@ def run():
     if not camera.isOpened():
         raise RuntimeError(f"camera unavailable: {camera_device}")
 
+    detector_config = DetectorConfig(
+        threshold=int(os.environ.get("IR_THRESHOLD", "235")),
+        min_area=float(os.environ.get("IR_MIN_AREA", "8")),
+        max_area=float(os.environ.get("IR_MAX_AREA", "12000")),
+        min_circularity=float(os.environ.get("IR_MIN_CIRCULARITY", "0.20")),
+        min_brightness=float(os.environ.get("IR_MIN_BRIGHTNESS", "180")),
+        blur_size=int(os.environ.get("IR_BLUR", "5")),
+        morph_kernel=int(os.environ.get("IR_MORPH_KERNEL", "3")),
+        auto_threshold=os.environ.get("IR_AUTO_THRESHOLD", "0") == "1",
+        auto_percentile=float(os.environ.get("IR_AUTO_PERCENTILE", "99.7")),
+        auto_margin=int(os.environ.get("IR_AUTO_MARGIN", "8")),
+    )
+    tracker_config = TrackerConfig(
+        low_pass_alpha=float(os.environ.get("TRACKER_ALPHA", "0.65")),
+        deadband_m=float(os.environ.get("TRACKER_DEADBAND_M", "0.03")),
+        gain_forward=float(os.environ.get("TRACKER_GAIN_FORWARD", "0.45")),
+        gain_right=float(os.environ.get("TRACKER_GAIN_RIGHT", "0.45")),
+        max_speed_mps=float(os.environ.get("TRACKER_MAX_SPEED_MPS", "0.6")),
+        max_accel_mps2=float(os.environ.get("TRACKER_MAX_ACCEL_MPS2", "0.8")),
+        stale_after_s=float(os.environ.get("TRACKER_STALE_AFTER_S", "0.20")),
+    )
+    optical_config = OpticalConfig(
+        acquire_count=int(os.environ.get("OPTICAL_ACQUIRE_COUNT", "3")),
+        loss_count=int(os.environ.get("OPTICAL_LOSS_COUNT", "1")),
+    )
     controller = VisionModeController(
-        detector=BrightSpotDetector(DetectorConfig()),
-        tracker=GuidedTracker(TrackerConfig()),
-        optical=OpticalStateMachine(OpticalConfig()),
+        detector=BrightSpotDetector(detector_config),
+        tracker=GuidedTracker(tracker_config),
+        optical=OpticalStateMachine(optical_config),
         camera=CameraConfig(),
     )
     publisher = OpticalStatePublisher(

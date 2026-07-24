@@ -14,7 +14,7 @@ CHECK atomic snapshot $HEALTH exists without temporary sibling
 CHECK fields command_id queue_depth fc_heartbeat_at optical last_error and fresh timestamp
 CHECK optical atomic state $OPTICAL is fresh and structurally valid
 CHECK /proc MainPID fd roles: aircraft owns ttyACM0/ttyUSB0 only
-CHECK /proc MainPID fd roles: vision owns ttyS9/video0 only
+CHECK /proc MainPID fd roles: vision owns ttyS9/configured camera only
 EOF
   exit 0
 fi
@@ -77,6 +77,7 @@ check_fd_roles() {
   done
 }
 
+camera_device="$(readlink -f "${VISION_CAMERA_DEVICE:-/dev/video0}")"
 check_fd_roles low-altitude-aircraft.service /dev/ttyACM0 /dev/ttyUSB0
-check_fd_roles low-altitude-vision.service /dev/ttyS9 /dev/video0
+check_fd_roles low-altitude-vision.service /dev/ttyS9 "$camera_device"
 echo "OK: aircraft services, atomic snapshots and device roles are healthy"

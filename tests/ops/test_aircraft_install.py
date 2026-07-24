@@ -42,7 +42,7 @@ class AircraftServiceTests(unittest.TestCase):
 
         self.assertIn("check_serial_roles.sh vision", vision)
         self.assertIn("DeviceAllow=/dev/ttyS9 rw", vision)
-        self.assertIn("DeviceAllow=/dev/video0 rw", vision)
+        self.assertIn("DeviceAllow=char-video4linux rw", vision)
         self.assertNotIn("/dev/ttyACM0", vision)
         self.assertNotIn("/dev/ttyUSB0", vision)
 
@@ -258,6 +258,7 @@ class AircraftInstallerTests(unittest.TestCase):
         self.assertIn("legacy_state", source)
         self.assertIn("restore_legacy_services", source)
         self.assertIn("health_aircraft.sh", source)
+        self.assertIn("source \"$env_file\"", source)
         self.assertIn("mktemp", source)
         self.assertIn("mv -f", source)
 

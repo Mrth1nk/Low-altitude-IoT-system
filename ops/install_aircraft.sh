@@ -163,6 +163,10 @@ say "HEALTH: validate atomic state, heartbeat and exclusive process roles"
 if ((DRY_RUN)); then
   run "$(dest /usr/local/lib/low-altitude-iot/health_aircraft.sh)" --dry-run
 else
+  set -a
+  # The file is root-owned mode 0600 and was validated during preflight.
+  source "$env_file"
+  set +a
   "$(dest /usr/local/lib/low-altitude-iot/health_aircraft.sh)"
 fi
 

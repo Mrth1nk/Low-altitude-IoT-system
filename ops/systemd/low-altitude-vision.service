@@ -20,7 +20,7 @@ RuntimeDirectory=low-altitude-iot
 UMask=0077
 DevicePolicy=closed
 DeviceAllow=/dev/ttyS9 rw
-DeviceAllow=/dev/video0 rw
+DeviceAllow=char-video4linux rw
 NoNewPrivileges=yes
 PrivateTmp=yes
 
