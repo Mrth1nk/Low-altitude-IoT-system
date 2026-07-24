@@ -66,6 +66,9 @@
       || "",
     ).toLowerCase();
     if (explicit.includes("blocked") || explicit.includes("interrupted")) return true;
+    if (/LINK_BLOCKED|SIGNAL_INTERRUPTED|SIGNAL_INT/i.test(
+      String(telemetry.aircraft_msg || ""),
+    )) return true;
     const messages = Array.isArray(aircraft.messages) ? aircraft.messages : [];
     return messages.some((item) => /LINK_BLOCKED|SIGNAL_INTERRUPTED|SIGNAL_INT/i.test(
       `${item?.type || ""} ${item?.text || ""}`,

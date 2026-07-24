@@ -63,6 +63,24 @@ test("blocked optical state clears aircraft detail and rejects every aircraft co
   assert.equal(aircraftCommandsAllowed(state), false);
 });
 
+test("legacy compact aircraft interruption state is treated as optical blocked", () => {
+  const state = normalizeCloudState([
+    {
+      code: "rover_state",
+      value: JSON.stringify({
+        aircraft_link: false,
+        aircraft_age: 17450,
+        aircraft_msg: "STATUSTEXT 状态 SIGNAL_INTERRUPTED:OPTICAL_LINK_BL",
+        aircraft_msg_time: 1710000000,
+      }),
+    },
+  ], 1710000001000);
+
+  assert.equal(state.optical.blocked, true);
+  assert.deepEqual(state.aircraft.messages, []);
+  assert.equal(aircraftCommandsAllowed(state), false);
+});
+
 test("repeated aircraft messages remain separate and keep source or cloud receive time", () => {
   const previous = [];
   const first = appendAircraftMessages(previous, [
