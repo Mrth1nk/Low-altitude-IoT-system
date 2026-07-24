@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import secrets
+import json
 import time
 import uuid
 
@@ -60,6 +61,7 @@ class AircraftLinkServer:
             raise ValueError("challenge must contain 32 bytes")
         self.challenge = challenge.hex()
         self.peer_session_nonce = None
+        self._reported_results = set()
         self.sequence = 0
         self.metrics = {
             "received": 0,
@@ -94,6 +96,7 @@ class AircraftLinkServer:
             raise RuntimeError("serial byte stream is not configured")
         data = self.stream.read(int(read_size))
         responses = self.feed_bytes(data or b"")
+        responses.extend(self.poll_transaction_status())
         responses.extend(self.poll_status(snapshot))
         for response in responses:
             self.stream.write(response)
@@ -104,6 +107,41 @@ class AircraftLinkServer:
             snapshot, now=float(self.clock())
         )
         return [] if frame is None else [self._seal(frame)]
+
+    def poll_transaction_status(self):
+        if not self.optical_gate.locked:
+            return []
+        responses = []
+        for result in self.inbox.results:
+            identity = (
+                result.get("command_id", ""),
+                result.get("stage", ""),
+            )
+            if identity in self._reported_results:
+                continue
+            detail = json.dumps(
+                result,
+                sort_keys=True,
+                separators=(",", ":"),
+                ensure_ascii=False,
+            )[:256]
+            responses.append(
+                self._seal(
+                    self._frame(
+                        MessageType.STATUS,
+                        uuid.UUID(str(result["command_id"])),
+                        {
+                            "state": str(result["stage"])[:64],
+                            "detail": detail,
+                            "timestamp": float(self.clock()),
+                        },
+                    )
+                )
+            )
+            self._reported_results.add(identity)
+            if len(responses) >= self.max_responses:
+                break
+        return responses
 
     def _handle_envelope(self, envelope):
         try:

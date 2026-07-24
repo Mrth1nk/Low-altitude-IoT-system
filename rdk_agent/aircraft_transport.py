@@ -75,6 +75,8 @@ class AircraftTransport:
         self._failure_count = 0
         self._next_reopen_at = 0.0
         self._transport_revision = 0
+        self._remote_stage = ""
+        self._remote_detail = ""
         self._socket = self._create_socket()
 
     @property
@@ -121,6 +123,9 @@ class AircraftTransport:
         state["revision"] = (
             f"{state.get('revision', 0)}:{self._transport_revision}"
         )
+        if self._remote_stage:
+            state["remote_stage"] = self._remote_stage
+            state["remote_detail"] = self._remote_detail
         return state
 
     def pump(self, now, max_receive=32):
@@ -192,6 +197,18 @@ class AircraftTransport:
                     self._optical_state = "locked"
                     self._link_detail = detail
                     self._last_locked_at = now
+                elif state.upper() in (
+                    "MISSION_STAGED",
+                    "VERIFIED",
+                    "COMPLETED",
+                    "FAILED",
+                    "UNSAFE_RESIDUAL",
+                ):
+                    self._remote_stage = state.upper()
+                    self._remote_detail = str(
+                        frame.payload.get("detail", "")
+                    )[:256]
+                    self._transport_revision += 1
                 else:
                     self._block(detail)
 

@@ -231,6 +231,28 @@ class AircraftTransportTests(unittest.TestCase):
             self.transport.status()["link_detail"], "optical_lost"
         )
 
+    def test_remote_transaction_status_does_not_change_locked_optical_state(self):
+        self.send_status()
+        transaction = Frame(
+            MessageType.STATUS,
+            0,
+            500,
+            self.command_id,
+            {
+                "state": "VERIFIED",
+                "detail": '{"execution_ready":false}',
+                "timestamp": 1.0,
+            },
+        )
+        self.send_frame(transaction)
+        time.sleep(0.005)
+        self.transport.pump(self.now)
+
+        self.assertEqual(self.transport.optical_state(), "locked")
+        state = self.transport.transaction_state()
+        self.assertEqual(state["remote_stage"], "VERIFIED")
+        self.assertIn("execution_ready", state["remote_detail"])
+
     def test_blocked_received_before_send_cancels_transaction_and_never_resends(self):
         self.send_status()
         self.queue()

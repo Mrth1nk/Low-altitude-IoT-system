@@ -32,12 +32,14 @@ class DurableInbox:
         max_history=512,
         max_staged=8,
         max_resume_items=32,
+        max_results=128,
     ):
         for name, value in (
             ("max_queue", max_queue),
             ("max_history", max_history),
             ("max_staged", max_staged),
             ("max_resume_items", max_resume_items),
+            ("max_results", max_results),
         ):
             if int(value) < 1:
                 raise ValueError(f"{name} must be positive")
@@ -46,6 +48,7 @@ class DurableInbox:
         self.max_history = int(max_history)
         self.max_staged = int(max_staged)
         self.max_resume_items = int(max_resume_items)
+        self.max_results = int(max_results)
         self._state = self.store.load(
             {
                 "version": 1,
@@ -53,8 +56,16 @@ class DurableInbox:
                 "queue": [],
                 "staged": {},
                 "seen": [],
+                "results": [],
             }
         )
+        self._state.setdefault("results", [])
+        for record in [
+            self._state.get("active"),
+            *self._state.get("queue", []),
+        ]:
+            if isinstance(record, dict) and record.get("kind") == "mission":
+                record.setdefault("stage", "MISSION_STAGED")
         self._validate_loaded()
 
     @property
@@ -65,6 +76,10 @@ class DurableInbox:
     @property
     def queue_depth(self):
         return len(self._state["queue"])
+
+    @property
+    def results(self):
+        return [dict(result) for result in self._state["results"]]
 
     def accept(self, frame):
         if not isinstance(frame, Frame):
@@ -127,6 +142,33 @@ class DurableInbox:
         )
         self.store.save(self._state)
         return dict(completed)
+
+    def finish_active(self, stage, detail="", **extra):
+        active = self._state["active"]
+        if active is None:
+            raise InboxRejected("no_active_command")
+        result = {
+            "command_id": active["command_id"],
+            "stage": str(stage),
+            "detail": str(detail)[:256],
+            **extra,
+        }
+        previous = copy.deepcopy(self._state)
+        try:
+            self._state["results"].append(result)
+            self._state["results"] = self._state["results"][
+                -self.max_results :
+            ]
+            self._state["active"] = (
+                self._state["queue"].pop(0)
+                if self._state["queue"]
+                else None
+            )
+            self.store.save(self._state)
+        except Exception:
+            self._state = previous
+            raise
+        return dict(result)
 
     def _begin(self, frame):
         key = self._mission_key(
@@ -200,6 +242,7 @@ class DurableInbox:
             "mission_id": frame.payload["mission_id"],
             "items": items,
             "checksum": checksum,
+            "stage": "MISSION_STAGED",
         }
         self._enqueue(record)
         del self._state["staged"][key]
@@ -244,7 +287,9 @@ class DurableInbox:
         ).hexdigest()
 
     def _validate_loaded(self):
-        required = {"version", "active", "queue", "staged", "seen"}
+        required = {
+            "version", "active", "queue", "staged", "seen", "results"
+        }
         if set(self._state) != required:
             raise ValueError("invalid inbox state fields")
         if not isinstance(self._state["queue"], list):
@@ -259,3 +304,7 @@ class DurableInbox:
             raise ValueError("invalid inbox history")
         if len(self._state["seen"]) > self.max_history:
             raise ValueError("persisted history exceeds limit")
+        if not isinstance(self._state["results"], list):
+            raise ValueError("invalid inbox results")
+        if len(self._state["results"]) > self.max_results:
+            raise ValueError("persisted results exceed limit")

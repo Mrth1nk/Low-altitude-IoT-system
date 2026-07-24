@@ -341,6 +341,29 @@ class AircraftLinkServerTests(unittest.TestCase):
         self.assertEqual(responses, [])
         self.assertEqual(self.server.metrics["rejected_frame"], 1)
 
+    def test_durable_worker_result_is_returned_as_transaction_status(self):
+        from tests.aircraft_agent.test_inbox import mission_frames
+
+        self.gate.set_locked(timestamp=self.now)
+        for frame in mission_frames():
+            self.inbox.accept(frame)
+        result = self.inbox.finish_active(
+            "VERIFIED",
+            "readback matched",
+            verified=True,
+            execution_ready=False,
+        )
+
+        frames = self.decode_responses(
+            self.server.poll_transaction_status()
+        )
+
+        self.assertEqual(len(frames), 1)
+        self.assertEqual(frames[0].message_type, MessageType.STATUS)
+        self.assertEqual(frames[0].payload["state"], "VERIFIED")
+        self.assertIn(result["command_id"], frames[0].payload["detail"])
+        self.assertEqual(self.server.poll_transaction_status(), [])
+
 
 if __name__ == "__main__":
     unittest.main()
