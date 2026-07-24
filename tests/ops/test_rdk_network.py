@@ -123,6 +123,13 @@ class HealthAndServiceTests(unittest.TestCase):
         self.assertNotIn("After=low-altitude-rdk-aircraft-network", base)
         self.assertIn("configure_rdk_network.sh --mode demo --persist", network)
 
+    def test_base_service_loads_root_owned_runtime_environment(self):
+        base = (SYSTEMD / "low-altitude-rdk.service").read_text()
+        self.assertIn(
+            "EnvironmentFile=/etc/low-altitude-iot/rdk.env",
+            base,
+        )
+
 
 class InstallerTests(unittest.TestCase):
     def test_installer_dry_run_has_transaction_and_no_secret(self):
@@ -153,6 +160,7 @@ class InstallerTests(unittest.TestCase):
 
     def test_installer_contains_health_rollback_trap(self):
         source = INSTALL.read_text()
+        self.assertIn("set -Eeuo pipefail", source)
         self.assertIn("rollback", source)
         self.assertIn("trap", source)
         self.assertIn("health_rdk.sh", source)
@@ -162,6 +170,18 @@ class InstallerTests(unittest.TestCase):
         self.assertIn("AIRCRAFT_WAS_ENABLED", source)
         self.assertIn("restore_service_state", source)
 
+    def test_rollback_never_copies_backup_root_metadata_onto_root(self):
+        source = INSTALL.read_text()
+        self.assertNotIn('cp -a "$BACKUP_DIR/." "$(dest /)/"', source)
+        self.assertIn('restore_backup_tree', source)
+
+    def test_installer_requires_root_only_aircraft_link_psk(self):
+        source = INSTALL.read_text()
+        self.assertIn("/etc/low-altitude-iot/rdk.env", source)
+        self.assertIn("AIRCRAFT_LINK_PSK", source)
+        self.assertIn("stat -c %u", source)
+        self.assertIn("stat -c %a", source)
+
     def test_optional_aircraft_start_failure_is_nonfatal(self):
         source = INSTALL.read_text()
         self.assertIn("aircraft network failed; Rover/Tuya remain active", source)
@@ -169,6 +189,14 @@ class InstallerTests(unittest.TestCase):
             "systemctl enable --now low-altitude-rdk-aircraft-network.service",
             source,
         )
+
+
+class StartRoverStackTests(unittest.TestCase):
+    def test_start_script_supports_external_existing_virtualenv(self):
+        source = (ROOT / "rdk_agent" / "start_rover_stack.sh").read_text()
+        self.assertIn("RDK_VENV", source)
+        self.assertIn('/home/sunrise/uav_tuya_agent/.venv', source)
+        self.assertIn('"$RDK_VENV/bin/activate"', source)
 
 
 if __name__ == "__main__":

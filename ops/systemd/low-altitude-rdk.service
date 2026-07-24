@@ -6,6 +6,7 @@ Wants=network-online.target
 [Service]
 Type=simple
 User=sunrise
+EnvironmentFile=/etc/low-altitude-iot/rdk.env
 WorkingDirectory=/opt/low-altitude-iot/current/rdk_agent
 ExecStart=/opt/low-altitude-iot/current/rdk_agent/start_rover_stack.sh
 Restart=on-failure

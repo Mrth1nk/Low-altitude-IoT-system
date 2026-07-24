@@ -19,7 +19,12 @@ if [ "${IMPORT_CHECK_ONLY:-0}" = "1" ]; then
   exit 0
 fi
 
-source .venv/bin/activate
+RDK_VENV="${RDK_VENV:-/home/sunrise/uav_tuya_agent/.venv}"
+if [ ! -f "$RDK_VENV/bin/activate" ]; then
+  echo "error: RDK virtualenv not found at $RDK_VENV" >&2
+  exit 2
+fi
+source "$RDK_VENV/bin/activate"
 GROUND_STATION_PORT="${GROUND_STATION_PORT:-8081}"
 
 if [ "${SKIP_L610_CONFIG:-0}" != "1" ] && [ -x ./configure_l610_primary.sh ]; then

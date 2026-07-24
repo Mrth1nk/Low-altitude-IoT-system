@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-set -euo pipefail
+set -Eeuo pipefail
 
 DRY_RUN=0
 ENABLE_DEMO=0
@@ -46,6 +46,22 @@ unit_active_state() {
   if systemctl is-active --quiet "$1" 2>/dev/null; then echo active; else echo inactive; fi
 }
 
+restore_backup_tree() {
+  local relative source target
+  for relative in \
+    opt/low-altitude-iot/current \
+    usr/local/lib/low-altitude-iot \
+    etc/systemd/system/low-altitude-rdk.service \
+    etc/systemd/system/low-altitude-rdk-aircraft-network.service; do
+    source="$BACKUP_DIR/$relative"
+    target="$(dest /$relative)"
+    [[ -e "$source" ]] || continue
+    rm -rf "$target"
+    install -d -m 0755 "$(dirname "$target")"
+    cp -a "$source" "$target"
+  done
+}
+
 rollback() {
   local rc=$?
   ((COMMITTED)) && return "$rc"
@@ -56,7 +72,7 @@ rollback() {
       mv "$(dest /opt/low-altitude-iot/previous)" \
         "$(dest /opt/low-altitude-iot/current)"
     fi
-    cp -a "$BACKUP_DIR/." "$(dest /)/"
+    restore_backup_tree
     systemctl daemon-reload || true
     restore_service_state low-altitude-rdk.service \
       "$BASE_WAS_ENABLED" "$BASE_WAS_ACTIVE"
@@ -73,6 +89,16 @@ if ((!DRY_RUN)); then
   for tool in install mktemp mv cp systemctl bash; do command -v "$tool" >/dev/null; done
   bash -n "$SOURCE_DIR/ops/configure_rdk_network.sh" \
     "$SOURCE_DIR/ops/health_rdk.sh" "$SOURCE_DIR/ops/install_rdk.sh"
+  runtime_env="$(dest /etc/low-altitude-iot/rdk.env)"
+  [[ -f "$runtime_env" && "$(stat -c %u "$runtime_env")" == 0 &&
+    "$(stat -c %a "$runtime_env")" == 600 ]] || {
+    echo "runtime requires root-owned mode-0600 $runtime_env" >&2
+    exit 1
+  }
+  grep -Eq '^AIRCRAFT_LINK_PSK=.+$' "$runtime_env" || {
+    echo "runtime environment is missing AIRCRAFT_LINK_PSK" >&2
+    exit 1
+  }
   if ((ENABLE_DEMO)); then
     secret_file="$(dest /etc/low-altitude-iot/rdk-network.env)"
     [[ -f "$secret_file" && "$(stat -c %u "$secret_file")" == 0 &&
