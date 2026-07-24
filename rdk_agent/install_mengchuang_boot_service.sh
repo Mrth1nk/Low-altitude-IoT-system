@@ -10,8 +10,9 @@ fi
 
 MENGCHUANG_CONNECTION="${MENGCHUANG_CONNECTION:-woshinailong}"
 MENGCHUANG_IFACE="${MENGCHUANG_IFACE:-wlan0}"
-CONNECT_TARGET="/usr/local/sbin/uav-connect-aircraft-wifi"
-UNIT_TARGET="/etc/systemd/system/uav-mengchuang-link.service"
+INSTALL_ROOT="${INSTALL_ROOT:-}"
+CONNECT_TARGET="${INSTALL_ROOT}/usr/local/sbin/uav-connect-aircraft-wifi"
+UNIT_TARGET="${INSTALL_ROOT}/etc/systemd/system/uav-mengchuang-link.service"
 PYTHON_BIN="${PYTHON_BIN:-$REPO_ROOT/rdk_agent/.venv/bin/python}"
 if [ ! -x "$PYTHON_BIN" ]; then
   PYTHON_BIN="${PYTHON_FALLBACK:-python3}"
@@ -52,6 +53,9 @@ if [ "${DRY_RUN:-0}" = "1" ]; then
   echo "backup existing units/scripts"
   echo "rollback on failure"
   echo "health-check services and active NetworkManager connection"
+  echo "record exact active WiFi profile"
+  echo "down woshinailong on rollback"
+  echo "restore prior active WiFi profile on rollback"
   render_connect_script
   render_unit
   exit 0
@@ -62,6 +66,10 @@ CONNECT_EXISTED=0
 UNIT_EXISTED=0
 UNIT_WAS_ENABLED=0
 UNIT_WAS_ACTIVE=0
+PRIOR_WIFI_PROFILE="$(
+  nmcli -t -f NAME,DEVICE con show --active 2>/dev/null |
+    awk -F: -v iface="$MENGCHUANG_IFACE" '$2 == iface {print $1; exit}'
+)"
 if sudo test -e "$CONNECT_TARGET"; then
   sudo cp -a "$CONNECT_TARGET" "$BACKUP_DIR/connect"
   CONNECT_EXISTED=1
@@ -78,7 +86,12 @@ if systemctl is-active --quiet uav-mengchuang-link.service 2>/dev/null; then
 fi
 
 rollback() {
+  status=$?
   set +e
+  nmcli con down "$MENGCHUANG_CONNECTION" 2>/dev/null || true
+  if [ -n "$PRIOR_WIFI_PROFILE" ]; then
+    nmcli con up "$PRIOR_WIFI_PROFILE" ifname "$MENGCHUANG_IFACE" || true
+  fi
   if [ "$CONNECT_EXISTED" = "1" ]; then
     sudo cp -a "$BACKUP_DIR/connect" "$CONNECT_TARGET"
   else
@@ -101,6 +114,7 @@ rollback() {
     sudo systemctl stop uav-mengchuang-link.service
   fi
   echo "installation failed; previous Wi-Fi service restored" >&2
+  exit "$status"
 }
 trap rollback ERR
 

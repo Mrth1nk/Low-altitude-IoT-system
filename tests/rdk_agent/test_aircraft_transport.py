@@ -2,6 +2,7 @@ import os
 from pathlib import Path
 import socket
 import subprocess
+import tempfile
 import time
 import unittest
 import uuid
@@ -9,12 +10,17 @@ import uuid
 from rdk_agent.aircraft_link import AircraftLink
 from rdk_agent.aircraft_transport import AircraftTransport, legacy_gateway_ports
 from rdk_agent.command_router import CloudCommand, CommandRouter, RuntimeCommandAPI
+from shared_protocol.auth import AuthenticatedDatagramCodec
 from shared_protocol.frame import Frame, MessageType, decode_frame, encode_frame
 
 
 class AircraftTransportTests(unittest.TestCase):
     def setUp(self):
         self.now = 0.0
+        self.key = b"transport-test-key-32-bytes!!!!"
+        self.peer_auth = AuthenticatedDatagramCodec(
+            self.key, session_nonce=b"P" * 16
+        )
         self.peer = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.peer.bind(("127.0.0.1", 0))
         self.peer.settimeout(0.5)
@@ -24,6 +30,7 @@ class AircraftTransportTests(unittest.TestCase):
             local_host="127.0.0.1",
             local_port=0,
             peer=self.peer.getsockname(),
+            psk=self.key,
             clock=lambda: self.now,
             status_timeout=3.0,
             retry_backoff=0.01,
@@ -60,16 +67,25 @@ class AircraftTransportTests(unittest.TestCase):
             uuid.uuid4(),
             {"state": state, "detail": detail},
         )
-        source.sendto(encode_frame(frame), self.transport.local_address)
+        self.send_frame(frame, source)
         time.sleep(0.005)
         self.transport.pump(self.now)
+
+    def send_frame(self, frame, source=None):
+        (source or self.peer).sendto(
+            self.peer_auth.seal(encode_frame(frame)),
+            self.transport.local_address,
+        )
+
+    def receive_frame(self):
+        data, sender = self.peer.recvfrom(4096)
+        return decode_frame(self.peer_auth.open(data)), sender
 
     def test_due_frame_reaches_udp_peer_and_matching_ack_clears_pending(self):
         self.send_status()
         self.queue()
         self.transport.pump(now=0.0)
-        data, sender = self.peer.recvfrom(4096)
-        command = decode_frame(data)
+        command, sender = self.receive_frame()
         self.assertEqual(command.command_id, self.command_id)
 
         ack = Frame(
@@ -79,7 +95,7 @@ class AircraftTransportTests(unittest.TestCase):
             command.command_id,
             {"acked_sequence": command.sequence},
         )
-        self.peer.sendto(encode_frame(ack), sender)
+        self.send_frame(ack)
         self.pump_until(lambda: self.link.pending_count == 0)
 
         self.assertEqual(self.link.pending_count, 0)
@@ -89,8 +105,7 @@ class AircraftTransportTests(unittest.TestCase):
         self.send_status()
         self.queue()
         self.transport.pump(now=0.0)
-        data, sender = self.peer.recvfrom(4096)
-        command = decode_frame(data)
+        command, sender = self.receive_frame()
         ack = Frame(
             MessageType.ACK,
             0,
@@ -98,7 +113,7 @@ class AircraftTransportTests(unittest.TestCase):
             uuid.uuid4(),
             {"acked_sequence": command.sequence},
         )
-        self.peer.sendto(encode_frame(ack), sender)
+        self.send_frame(ack)
         time.sleep(0.005)
         self.transport.pump(now=0.001)
 
@@ -111,7 +126,7 @@ class AircraftTransportTests(unittest.TestCase):
             command.command_id,
             {"acked_sequence": command.sequence + 1},
         )
-        self.peer.sendto(encode_frame(wrong_sequence), sender)
+        self.send_frame(wrong_sequence)
         time.sleep(0.005)
         self.transport.pump(now=0.002)
 
@@ -125,7 +140,7 @@ class AircraftTransportTests(unittest.TestCase):
             uuid.uuid4(),
             {"reason": "optical_lost"},
         )
-        self.peer.sendto(encode_frame(blocked), self.transport.local_address)
+        self.send_frame(blocked)
         self.pump_until(lambda: self.transport.status()["link_detail"] == "optical_lost")
         rover = lambda command: None
         router = CommandRouter(
@@ -149,7 +164,7 @@ class AircraftTransportTests(unittest.TestCase):
             uuid.uuid4(),
             {"reason": "beam_interrupted"},
         )
-        self.peer.sendto(encode_frame(blocked), self.transport.local_address)
+        self.send_frame(blocked)
         time.sleep(0.005)
         self.transport.pump(self.now)
 
@@ -195,10 +210,9 @@ class AircraftTransportTests(unittest.TestCase):
         self.send_status()
         self.queue()
         self.transport.pump(now=0.0)
-        first_data, sender = self.peer.recvfrom(4096)
-        first_frame = decode_frame(first_data)
+        first_frame, sender = self.receive_frame()
         self.transport.pump(now=0.02)
-        self.peer.recvfrom(4096)
+        self.receive_frame()
         self.transport.pump(now=0.04)
 
         state = self.transport.transaction_state()
@@ -213,7 +227,7 @@ class AircraftTransportTests(unittest.TestCase):
             first_frame.command_id,
             {"acked_sequence": first_frame.sequence},
         )
-        self.peer.sendto(encode_frame(late_ack), sender)
+        self.send_frame(late_ack)
         self.pump_until(
             lambda: self.transport.transaction_state()["stage"]
             == "retry_exhausted"
@@ -249,8 +263,8 @@ class AircraftTransportTests(unittest.TestCase):
         self.transport._socket_factory = socket.socket
         self.now = 0.02
         self.transport.pump(self.now)
-        data, _ = self.peer.recvfrom(4096)
-        self.assertEqual(decode_frame(data).command_id, self.command_id)
+        frame, _ = self.receive_frame()
+        self.assertEqual(frame.command_id, self.command_id)
 
     def test_udp_receive_error_recreates_socket_without_cancelling_transaction(self):
         self.send_status()
@@ -281,8 +295,7 @@ class AircraftTransportTests(unittest.TestCase):
         self.send_status()
         self.queue()
         self.transport.pump(now=0.0)
-        data, sender = self.peer.recvfrom(4096)
-        sent = decode_frame(data)
+        sent, sender = self.receive_frame()
         ack = Frame(
             MessageType.ACK,
             0,
@@ -290,7 +303,7 @@ class AircraftTransportTests(unittest.TestCase):
             sent.command_id,
             {"acked_sequence": sent.sequence},
         )
-        self.peer.sendto(encode_frame(ack), sender)
+        self.send_frame(ack)
         time.sleep(0.005)
         self.transport.pump(now=0.01)
         self.assertEqual(
@@ -319,8 +332,7 @@ class AircraftTransportTests(unittest.TestCase):
         self.send_status()
         self.queue()
         self.transport.pump(now=0.0)
-        data, sender = self.peer.recvfrom(4096)
-        command = decode_frame(data)
+        command, sender = self.receive_frame()
         nack = Frame(
             MessageType.NACK,
             0,
@@ -328,7 +340,7 @@ class AircraftTransportTests(unittest.TestCase):
             command.command_id,
             {"acked_sequence": command.sequence, "reason": "mission_denied"},
         )
-        self.peer.sendto(encode_frame(nack), sender)
+        self.send_frame(nack)
         self.pump_until(lambda: self.link.pending_count == 0)
 
         state = self.transport.transaction_state()
@@ -366,6 +378,79 @@ class AircraftTransportTests(unittest.TestCase):
 
         self.assertEqual(result["stage"], "staged")
         self.assertEqual(self.link.pending_count, 3)
+
+    def test_production_transport_requires_psk(self):
+        with self.assertRaisesRegex(ValueError, "PSK"):
+            AircraftTransport(
+                AircraftLink(),
+                local_host="127.0.0.1",
+                local_port=0,
+                peer=self.peer.getsockname(),
+                psk=None,
+            )
+
+    def test_unauthenticated_bad_mac_and_replayed_status_never_update_state(self):
+        key = b"transport-test-key-32-bytes!!!!"
+        transport = AircraftTransport(
+            AircraftLink(),
+            local_host="127.0.0.1",
+            local_port=0,
+            peer=self.peer.getsockname(),
+            psk=key,
+            clock=lambda: self.now,
+        )
+        peer_auth = AuthenticatedDatagramCodec(
+            key, session_nonce=b"P" * 16
+        )
+        try:
+            status = encode_frame(
+                Frame(
+                    MessageType.STATUS,
+                    0,
+                    72,
+                    uuid.uuid4(),
+                    {"state": "locked", "detail": "authenticated"},
+                )
+            )
+            self.peer.sendto(status, transport.local_address)
+            time.sleep(0.005)
+            transport.pump(0.0)
+            self.assertEqual(transport.optical_state(), "blocked")
+
+            bad = bytearray(peer_auth.seal(status))
+            bad[-1] ^= 1
+            self.peer.sendto(bytes(bad), transport.local_address)
+            time.sleep(0.005)
+            transport.pump(0.0)
+            self.assertEqual(transport.optical_state(), "blocked")
+
+            authenticated = peer_auth.seal(status)
+            self.peer.sendto(authenticated, transport.local_address)
+            time.sleep(0.005)
+            transport.pump(0.0)
+            self.assertEqual(transport.optical_state(), "locked")
+
+            blocked = encode_frame(
+                Frame(
+                    MessageType.LINK_BLOCKED,
+                    0,
+                    73,
+                    uuid.uuid4(),
+                    {"reason": "new-state"},
+                )
+            )
+            replayed = peer_auth.seal(blocked)
+            self.peer.sendto(replayed, transport.local_address)
+            time.sleep(0.005)
+            transport.pump(0.0)
+            self.assertEqual(transport.optical_state(), "blocked")
+
+            self.peer.sendto(authenticated, transport.local_address)
+            time.sleep(0.005)
+            transport.pump(0.0)
+            self.assertEqual(transport.optical_state(), "blocked")
+        finally:
+            transport.close()
 
 
 class StartupImportTests(unittest.TestCase):
@@ -477,6 +562,96 @@ class StartupImportTests(unittest.TestCase):
         self.assertIn("backup existing units/scripts", result.stdout)
         self.assertIn("health-check services", result.stdout)
         self.assertIn("rollback on failure", result.stdout)
+        self.assertIn("record exact active WiFi profile", result.stdout)
+        self.assertIn("down woshinailong", result.stdout)
+        self.assertIn("restore prior active WiFi profile", result.stdout)
+
+    def test_wifi_installer_tracks_unit_and_exact_preinstall_wifi_state(self):
+        repo = Path(__file__).resolve().parents[2]
+        script = (
+            repo / "rdk_agent/install_mengchuang_boot_service.sh"
+        ).read_text()
+
+        self.assertIn("UNIT_WAS_ENABLED", script)
+        self.assertIn("UNIT_WAS_ACTIVE", script)
+        self.assertIn("PRIOR_WIFI_PROFILE", script)
+        self.assertIn('nmcli con down "$MENGCHUANG_CONNECTION"', script)
+        self.assertIn('nmcli con up "$PRIOR_WIFI_PROFILE"', script)
+
+    def test_wifi_installer_failed_health_check_restores_prior_runtime_state(self):
+        repo = Path(__file__).resolve().parents[2]
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            bin_dir = root / "bin"
+            install_root = root / "root"
+            bin_dir.mkdir()
+            (install_root / "usr/local/sbin").mkdir(parents=True)
+            (install_root / "etc/systemd/system").mkdir(parents=True)
+            command_log = root / "commands.log"
+            active_count = root / "active-count"
+
+            scripts = {
+                "sudo": '#!/bin/sh\nexec "$@"\n',
+                "ip": '#!/bin/sh\nexit 0\n',
+                "nmcli": (
+                    '#!/bin/sh\n'
+                    f'echo "nmcli $*" >> "{command_log}"\n'
+                    'if [ "$1 $2 $3 $4 $5 $6" = "-t -f NAME,DEVICE con show --active" ]; then\n'
+                    '  echo "PhoneProfile:wlan0"\n'
+                    'fi\n'
+                    'exit 0\n'
+                ),
+                "systemctl": (
+                    '#!/bin/sh\n'
+                    f'echo "systemctl $*" >> "{command_log}"\n'
+                    'case "$1" in\n'
+                    '  is-enabled) exit 0 ;;\n'
+                    '  is-active)\n'
+                    f'    count=$(cat "{active_count}" 2>/dev/null || echo 0)\n'
+                    f'    echo $((count + 1)) > "{active_count}"\n'
+                    '    [ "$count" -eq 0 ] && exit 0 || exit 1 ;;\n'
+                    'esac\n'
+                    'exit 0\n'
+                ),
+            }
+            for name, content in scripts.items():
+                path = bin_dir / name
+                path.write_text(content)
+                path.chmod(0o755)
+
+            env = dict(os.environ)
+            env.update(
+                {
+                    "PATH": f"{bin_dir}:{env['PATH']}",
+                    "REPO_ROOT": str(repo),
+                    "INSTALL_ROOT": str(install_root),
+                    "PYTHON_BIN": os.environ.get("PYTHON", "python3"),
+                }
+            )
+            result = subprocess.run(
+                ["bash", "rdk_agent/install_mengchuang_boot_service.sh"],
+                cwd=repo,
+                env=env,
+                text=True,
+                capture_output=True,
+                timeout=10,
+            )
+
+            self.assertNotEqual(result.returncode, 0)
+            commands = command_log.read_text()
+            self.assertIn(
+                "nmcli con down woshinailong", commands
+            )
+            self.assertIn(
+                "nmcli con up PhoneProfile ifname wlan0", commands
+            )
+            self.assertIn(
+                "systemctl enable uav-mengchuang-link.service", commands
+            )
+            self.assertIn(
+                "systemctl restart uav-mengchuang-link.service", commands
+            )
+            self.assertIn("previous Wi-Fi service restored", result.stderr)
 
 
 if __name__ == "__main__":

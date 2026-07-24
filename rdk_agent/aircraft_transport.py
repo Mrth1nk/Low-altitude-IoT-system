@@ -3,6 +3,7 @@
 import socket
 import time
 
+from shared_protocol.auth import AuthError, AuthenticatedDatagramCodec
 from shared_protocol.frame import FrameError, MessageType, decode_frame
 
 
@@ -24,6 +25,7 @@ class AircraftTransport:
         local_host="0.0.0.0",
         local_port=14560,
         peer=("192.168.4.1", 14555),
+        psk=None,
         socket_factory=socket.socket,
         clock=time.monotonic,
         status_timeout=3.0,
@@ -32,12 +34,15 @@ class AircraftTransport:
     ):
         if peer is None:
             raise ValueError("an exact aircraft peer is required")
+        if psk is None or (isinstance(psk, str) and not psk):
+            raise ValueError("AIRCRAFT_LINK_PSK is required")
         if status_timeout <= 0:
             raise ValueError("status_timeout must be positive")
         if retry_backoff <= 0 or max_retry_backoff < retry_backoff:
             raise ValueError("invalid retry backoff")
         self.aircraft_link = aircraft_link
         self._peer = (str(peer[0]), int(peer[1]))
+        self._auth = AuthenticatedDatagramCodec(psk)
         self._local_host = str(local_host)
         self._local_port = int(local_port)
         self._socket_factory = socket_factory
@@ -116,7 +121,7 @@ class AircraftTransport:
             return self.transaction_state()
         try:
             for payload in self.aircraft_link.due_bytes(now):
-                self._socket.sendto(payload, self._peer)
+                self._socket.sendto(self._auth.seal(payload), self._peer)
         except OSError as exc:
             self._schedule_reopen(now, f"udp send failed: {exc}")
         return self.transaction_state()
@@ -131,6 +136,10 @@ class AircraftTransport:
                 self._schedule_reopen(now, f"udp receive failed: {exc}")
                 return
             if (str(remote[0]), int(remote[1])) != self._peer:
+                continue
+            try:
+                data = self._auth.open(data)
+            except AuthError:
                 continue
             try:
                 frame = decode_frame(data)

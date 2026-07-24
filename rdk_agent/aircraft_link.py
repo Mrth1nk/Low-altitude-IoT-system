@@ -36,16 +36,6 @@ class AircraftLink:
     def active_command_id(self):
         return self._active_command_id
 
-    def _sequence(self):
-        result = self._next_sequence
-        self._next_sequence = (self._next_sequence + 1) & 0xFFFFFFFF
-        return result
-
-    def _queue(self, message_type, command_id, payload, now):
-        frame = Frame(message_type, 0, self._sequence(), command_id, payload)
-        self.sender.queue(frame, now)
-        return frame
-
     def execute(self, command, now=None):
         if command.target != "aircraft":
             raise ValueError("AircraftLink accepts aircraft commands only")
@@ -54,21 +44,22 @@ class AircraftLink:
         if command.command_id in self._terminal:
             raise ValueError("aircraft transaction is already terminal")
         now = 0.0 if now is None else float(now)
-        self._active_command_id = command.command_id
-        self._transaction_id = str(command.command_id)
-        self._error = ""
         if command.action == "mission":
-            return self._stage_mission(command, now)
-        self._queue(
-            MessageType.COMMAND,
-            command.command_id,
-            {"action": command.action, "parameters": dict(command.payload)},
-            now,
-        )
-        self._set_stage("queued")
-        return {"stage": "queued", "frame_count": 1}
+            frames = self._build_mission(command)
+            stage = "staged"
+        else:
+            frames = [
+                self._frame(
+                    MessageType.COMMAND,
+                    command.command_id,
+                    {"action": command.action, "parameters": dict(command.payload)},
+                    0,
+                )
+            ]
+            stage = "queued"
+        return self._acquire_and_queue(command.command_id, frames, now, stage)
 
-    def _stage_mission(self, command, now):
+    def _build_mission(self, command):
         mission_id = str(command.payload.get("mission_id", "")).strip()
         items = command.payload.get("items")
         if not mission_id:
@@ -89,33 +80,69 @@ class AircraftLink:
             ).encode("utf-8")
         ).hexdigest()
 
-        self._queue(
-            MessageType.MISSION_BEGIN,
-            command.command_id,
-            {
+        payloads = [
+            (
+                MessageType.MISSION_BEGIN,
+                {
                 "mission_id": mission_id,
                 "item_count": len(normalized),
                 "vehicle": "aircraft",
                 "checksum": checksum,
-            },
-            now,
-        )
-        for item in normalized:
-            self._queue(
-                MessageType.MISSION_ITEM, command.command_id, item, now
+                },
             )
-        self._queue(
-            MessageType.MISSION_COMMIT,
-            command.command_id,
-            {
+        ]
+        payloads.extend((MessageType.MISSION_ITEM, item) for item in normalized)
+        payloads.append(
+            (
+                MessageType.MISSION_COMMIT,
+                {
                 "mission_id": mission_id,
                 "item_count": len(normalized),
                 "checksum": checksum,
-            },
-            now,
+                },
+            )
         )
-        self._set_stage("staged")
-        return {"stage": "staged", "frame_count": len(normalized) + 2}
+        return [
+            self._frame(message_type, command.command_id, payload, offset)
+            for offset, (message_type, payload) in enumerate(payloads)
+        ]
+
+    def _frame(self, message_type, command_id, payload, offset):
+        sequence = (self._next_sequence + offset) & 0xFFFFFFFF
+        frame = Frame(message_type, 0, sequence, command_id, payload)
+        encode_frame(frame)
+        return frame
+
+    def _acquire_and_queue(self, command_id, frames, now, stage):
+        previous = (
+            self._transaction_id,
+            self._stage,
+            self._error,
+            self._revision,
+            self._next_sequence,
+        )
+        self._active_command_id = command_id
+        self._transaction_id = str(command_id)
+        self._error = ""
+        try:
+            for frame in frames:
+                self.sender.queue(frame, now)
+        except Exception:
+            self.sender.cancel(command_id)
+            self._active_command_id = None
+            (
+                self._transaction_id,
+                self._stage,
+                self._error,
+                self._revision,
+                self._next_sequence,
+            ) = previous
+            raise
+        self._next_sequence = (
+            self._next_sequence + len(frames)
+        ) & 0xFFFFFFFF
+        self._set_stage(stage)
+        return {"stage": stage, "frame_count": len(frames)}
 
     @staticmethod
     def _mission_item(mission_id, index, item):

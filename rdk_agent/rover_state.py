@@ -41,6 +41,9 @@ def compact_json_bytes(data: dict[str, Any], max_bytes: int = 480) -> str:
             "aircraft_tx_pending",
             "aircraft_mission_status",
             "aircraft_fault_text",
+            "aircraft_command_event",
+            "aircraft_command_event_id",
+            "aircraft_command_fault",
             "last_command",
             "aircraft_link",
             "aircraft_age",
@@ -138,6 +141,9 @@ def compact_json_bytes(data: dict[str, Any], max_bytes: int = 480) -> str:
         "aircraft_tx_pending",
         "aircraft_mission_status",
         "aircraft_fault_text",
+        "aircraft_command_event",
+        "aircraft_command_event_id",
+        "aircraft_command_fault",
         "steering",
         "throttle",
         "last_command",
@@ -190,6 +196,9 @@ class RoverTelemetry:
     aircraft_transaction_revision: str = ""
     aircraft_mission_status: str = "idle"
     aircraft_fault_text: str = ""
+    aircraft_command_event: str = ""
+    aircraft_command_event_id: str = ""
+    aircraft_command_fault: str = ""
     updated_at: float = field(default_factory=time.time)
 
     def data(self) -> dict[str, Any]:
@@ -252,7 +261,28 @@ class RoverTelemetry:
                     "aircraft_fault_text": str(self.aircraft_fault_text)[:120],
                 }
             )
+        if self.aircraft_command_event or self.aircraft_command_fault:
+            data.update(
+                {
+                    "aircraft_command_event": str(
+                        self.aircraft_command_event
+                    )[:24],
+                    "aircraft_command_event_id": str(
+                        self.aircraft_command_event_id
+                    )[:36],
+                    "aircraft_command_fault": str(
+                        self.aircraft_command_fault
+                    )[:120],
+                }
+            )
         return data
+
+    def record_aircraft_command_event(
+        self, command_id: str, event: str, fault: str = ""
+    ) -> None:
+        self.aircraft_command_event_id = str(command_id)[:36]
+        self.aircraft_command_event = str(event)[:24]
+        self.aircraft_command_fault = str(fault)[:120]
 
     def apply_aircraft_transaction(self, state: dict[str, Any]) -> bool:
         revision = str(state.get("revision", ""))
@@ -295,6 +325,28 @@ class RoverTelemetry:
             "sys": {"ack": 1},
             "data": {k: {"value": v, "time": now_ms} for k, v in cloud_data.items()},
         }
+
+
+def record_command_receipt(
+    telemetry: RoverTelemetry,
+    target: str,
+    command_id: str,
+    accepted: bool,
+    stage: str,
+    message: str,
+) -> None:
+    if target == "aircraft":
+        telemetry.record_aircraft_command_event(
+            command_id,
+            "accepted" if accepted else "rejected",
+            "" if accepted else message,
+        )
+        return
+    telemetry.mission_status = message if accepted else "command_failed"
+    telemetry.fault_text = "" if accepted else message
+    telemetry.rover_transaction_stage = stage
+    telemetry.rover_transaction_id = command_id
+    telemetry.rover_transaction_pending = 0
 
 
 @dataclass

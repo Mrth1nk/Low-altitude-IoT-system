@@ -105,6 +105,10 @@
 
 ## Deferred
 
+- ELF authenticated LIOT integration: the RDK transport now requires HMAC-authenticated
+  datagrams. Before deploying this revision to the live aircraft link, update the ELF
+  bridge to use `shared_protocol.auth.AuthenticatedDatagramCodec` with the same
+  untracked `AIRCRAFT_LINK_PSK`.
 - Task 11: ground-station full-mission editor and OpenAPI mission payload/filtering.
   The runtime accepts normalized complete mission payloads, but this task deliberately
   does not change either ground-station implementation or its per-point UI.

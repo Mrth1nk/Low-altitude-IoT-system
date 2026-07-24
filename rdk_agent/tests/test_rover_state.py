@@ -1,6 +1,12 @@
 import unittest
 
-from rover_state import RoverCommand, RoverTelemetry, clamp, compact_json_bytes
+from rover_state import (
+    RoverCommand,
+    RoverTelemetry,
+    clamp,
+    compact_json_bytes,
+    record_command_receipt,
+)
 
 
 class RoverStateTests(unittest.TestCase):
@@ -107,6 +113,51 @@ class RoverStateTests(unittest.TestCase):
         telemetry.aircraft_mission_status = "operator note"
         self.assertFalse(telemetry.apply_aircraft_transaction(state))
         self.assertEqual(telemetry.aircraft_mission_status, "operator note")
+
+    def test_rejected_aircraft_command_event_does_not_replace_active_transaction(self):
+        telemetry = RoverTelemetry(
+            aircraft_transaction_stage="awaiting_ack",
+            aircraft_transaction_id="active-id",
+            aircraft_transaction_pending=3,
+        )
+
+        telemetry.record_aircraft_command_event(
+            "rejected-id", "rejected", "aircraft transaction already active"
+        )
+
+        self.assertEqual(telemetry.aircraft_transaction_stage, "awaiting_ack")
+        self.assertEqual(telemetry.aircraft_transaction_id, "active-id")
+        self.assertEqual(telemetry.aircraft_transaction_pending, 3)
+        data = telemetry.data()
+        self.assertEqual(data["aircraft_command_event_id"], "rejected-id")
+        self.assertEqual(data["aircraft_command_event"], "rejected")
+        self.assertEqual(
+            data["aircraft_command_fault"],
+            "aircraft transaction already active",
+        )
+        self.assertLessEqual(len(data["aircraft_command_event_id"]), 36)
+        self.assertLessEqual(len(data["aircraft_command_fault"]), 120)
+
+    def test_runtime_receipt_routes_aircraft_rejection_only_to_event_fields(self):
+        telemetry = RoverTelemetry(
+            aircraft_transaction_stage="awaiting_ack",
+            aircraft_transaction_id="active-id",
+            aircraft_transaction_pending=2,
+        )
+
+        record_command_receipt(
+            telemetry,
+            target="aircraft",
+            command_id="rejected-id",
+            accepted=False,
+            stage="rejected",
+            message="aircraft transaction already active",
+        )
+
+        self.assertEqual(telemetry.aircraft_transaction_id, "active-id")
+        self.assertEqual(telemetry.aircraft_transaction_stage, "awaiting_ack")
+        self.assertEqual(telemetry.aircraft_command_event_id, "rejected-id")
+        self.assertEqual(telemetry.aircraft_command_event, "rejected")
 
 
 if __name__ == "__main__":

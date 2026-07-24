@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import argparse
 import json
+import os
 import ssl
 import time
 from pathlib import Path
@@ -13,7 +14,7 @@ from aircraft_transport import AircraftTransport, legacy_gateway_ports
 from command_router import CloudCommand, CommandRejected, CommandRouter
 from l610 import check_l610, ensure_l610_usbnet, read_lte_rssi
 from mavlink_rover import RoverMavlink, discover_mavlink_urls
-from rover_state import RoverCommand, RoverTelemetry
+from rover_state import RoverCommand, RoverTelemetry, record_command_receipt
 from tuya_auth import build_tuya_credentials, make_topic
 
 CONFIG_PATH = Path.home() / "uav_tuya_agent" / "config.json"
@@ -197,6 +198,9 @@ def run_agent(config: dict) -> int:
             str(config.get("aircraft_peer_host", "192.168.4.1")),
             int(config.get("aircraft_peer_port", 14555)),
         ),
+        psk=config.get("aircraft_link_psk") or os.environ.get(
+            "AIRCRAFT_LINK_PSK"
+        ),
     )
 
     class RoverExecutor:
@@ -269,28 +273,14 @@ def run_agent(config: dict) -> int:
                     if command.target == "aircraft"
                     else command.action
                 )
-                if command.target == "aircraft":
-                    telemetry.aircraft_transaction_stage = str(
-                        result.get("stage", "unknown")
-                    )
-                    telemetry.aircraft_transaction_id = str(command.command_id)
-                    telemetry.aircraft_transaction_pending = (
-                        aircraft_link.pending_count
-                    )
-                    telemetry.aircraft_mission_status = (
-                        message if ok else "command_failed"
-                    )
-                    telemetry.aircraft_fault_text = "" if ok else message
-                else:
-                    telemetry.mission_status = (
-                        message if ok else "command_failed"
-                    )
-                    telemetry.fault_text = "" if ok else message
-                    telemetry.rover_transaction_stage = str(
-                        result.get("stage", "unknown")
-                    )
-                    telemetry.rover_transaction_id = str(command.command_id)
-                    telemetry.rover_transaction_pending = 0
+                record_command_receipt(
+                    telemetry,
+                    target=command.target,
+                    command_id=str(command.command_id),
+                    accepted=ok,
+                    stage=str(result.get("stage", "unknown")),
+                    message=message,
+                )
                 rover_command = result.get("rover_command")
                 if ok and rover_command and rover_command.command in ("manual", "drive") and (rover_command.steering or rover_command.throttle):
                     manual_active_until = time.time() + 1.8

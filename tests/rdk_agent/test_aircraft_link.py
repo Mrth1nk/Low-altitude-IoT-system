@@ -104,6 +104,47 @@ class AircraftLinkTests(unittest.TestCase):
                 now=0.0,
             )
 
+    def test_invalid_mission_is_atomic_and_next_valid_command_works(self):
+        invalid = {"mission_id": "invalid", "items": [{"lat": 32.1}]}
+
+        with self.assertRaises(KeyError):
+            self.link.execute(self.command("mission", invalid), now=0.0)
+
+        self.assertIsNone(self.link.active_command_id)
+        self.assertEqual(self.link.pending_count, 0)
+        self.assertEqual(self.link.transaction_state()["transaction_id"], "")
+        result = self.link.execute(self.command("guided"), now=0.0)
+        self.assertEqual(result["stage"], "queued")
+        self.assertEqual(self.link.pending_count, 1)
+
+    def test_mission_queue_failure_rolls_back_every_frame_and_active_slot(self):
+        original_queue = self.link.sender.queue
+        calls = 0
+
+        def fail_second(frame, now):
+            nonlocal calls
+            calls += 1
+            if calls == 2:
+                raise RuntimeError("queue unavailable")
+            return original_queue(frame, now)
+
+        self.link.sender.queue = fail_second
+        with self.assertRaisesRegex(RuntimeError, "queue unavailable"):
+            self.link.execute(
+                self.command(
+                    "mission",
+                    {"mission_id": "rollback", "items": mission_items()},
+                ),
+                now=0.0,
+            )
+
+        self.assertIsNone(self.link.active_command_id)
+        self.assertEqual(self.link.pending_count, 0)
+        self.assertEqual(self.link.transaction_state()["transaction_id"], "")
+        self.link.sender.queue = original_queue
+        result = self.link.execute(self.command("land"), now=0.0)
+        self.assertEqual(result["stage"], "queued")
+
     def test_mission_nack_is_terminal_cancels_all_frames_and_ignores_late_ack(self):
         self.link.execute(
             self.command(
