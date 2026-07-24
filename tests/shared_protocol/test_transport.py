@@ -353,6 +353,68 @@ class ReceiverStateTests(unittest.TestCase):
         )
         self.assertIsNone(receiver.mission(commands[0], "m0", now=12.0))
 
+    def test_expiry_clears_transaction_dedup_for_reliable_retransmit(self):
+        receiver = ReceiverState(mission_ttl=5.0)
+        begin = self.frame(
+            MessageType.MISSION_BEGIN,
+            40,
+            {"mission_id": "retry", "item_count": 1, "vehicle": "aircraft"},
+        )
+        item = self.frame(
+            MessageType.MISSION_ITEM,
+            41,
+            {
+                "mission_id": "retry",
+                "index": 0,
+                "lat": 32.1,
+                "lon": 118.8,
+                "alt": 10.0,
+            },
+        )
+        self.assertTrue(receiver.accept(begin, now=0.0))
+        self.assertTrue(receiver.accept(item, now=1.0))
+        self.assertIsNone(receiver.mission(self.command_id, "retry", now=6.0))
+
+        self.assertTrue(receiver.accept(begin, now=6.0))
+        self.assertTrue(receiver.accept(item, now=6.0))
+        restarted = receiver.mission(self.command_id, "retry", now=6.0)
+        self.assertEqual(restarted.received_indices, (0,))
+
+    def test_implicit_clock_stays_in_explicit_time_domain_and_advances(self):
+        clock_value = [500.0]
+        receiver = ReceiverState(
+            mission_ttl=5.0,
+            clock=lambda: clock_value[0],
+        )
+        begin = self.frame(
+            MessageType.MISSION_BEGIN,
+            50,
+            {"mission_id": "clocked", "item_count": 1, "vehicle": "aircraft"},
+        )
+        receiver.accept(begin, now=100.0)
+
+        clock_value[0] = 501.0
+        self.assertIsNotNone(receiver.mission(self.command_id, "clocked"))
+        clock_value[0] = 505.0
+        self.assertIsNone(receiver.mission(self.command_id, "clocked"))
+
+    def test_implicit_clock_is_used_when_no_time_is_injected(self):
+        clock_value = [10.0]
+        receiver = ReceiverState(
+            mission_ttl=2.0,
+            clock=lambda: clock_value[0],
+        )
+        receiver.accept(
+            self.frame(
+                MessageType.MISSION_BEGIN,
+                60,
+                {"mission_id": "implicit", "item_count": 1, "vehicle": "aircraft"},
+            )
+        )
+        clock_value[0] = 12.0
+
+        self.assertIsNone(receiver.mission(self.command_id, "implicit"))
+
     def test_resume_paginates_missing_indexes_with_hard_page_bound(self):
         receiver = ReceiverState(max_missing_page=10)
         receiver.accept(

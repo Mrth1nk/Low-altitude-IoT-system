@@ -2,6 +2,7 @@
 
 from collections import OrderedDict, deque
 from dataclasses import dataclass, field
+import time
 
 from .frame import Frame, MessageType
 from .messages import validate_payload
@@ -102,6 +103,7 @@ class ReceiverState:
         max_missions=8,
         mission_ttl=300.0,
         max_missing_page=32,
+        clock=None,
     ):
         if history_limit < 1:
             raise ValueError("history_limit must be positive")
@@ -111,20 +113,24 @@ class ReceiverState:
             raise ValueError("mission_ttl must be positive")
         if max_missing_page < 1:
             raise ValueError("max_missing_page must be positive")
+        if clock is not None and not callable(clock):
+            raise TypeError("clock must be callable")
         self.history_limit = history_limit
         self.max_missions = max_missions
         self.mission_ttl = float(mission_ttl)
         self.max_missing_page = max_missing_page
+        self._clock = clock if clock is not None else time.monotonic
+        self._clock_offset = None
         self._seen = OrderedDict()
         self._missions = {}
         self._last_now = None
 
-    def mission(self, command_id, mission_id, now=0.0):
+    def mission(self, command_id, mission_id, now=None):
         now = self._prepare_now(now)
         self._expire(now)
         return self._missions.get((command_id, mission_id))
 
-    def resume(self, command_id, mission_id, offset=0, limit=None, now=0.0):
+    def resume(self, command_id, mission_id, offset=0, limit=None, now=None):
         now = self._prepare_now(now)
         self._expire(now)
         mission = self._require_mission(command_id, mission_id)
@@ -140,7 +146,7 @@ class ReceiverState:
         next_offset = page[-1] + 1 if len(remaining) > len(page) else None
         return {"missing_indices": page, "next_offset": next_offset}
 
-    def accept(self, frame, now=0.0):
+    def accept(self, frame, now=None):
         if not isinstance(frame, Frame):
             raise TypeError("frame must be a Frame")
         now = self._prepare_now(now)
@@ -157,18 +163,27 @@ class ReceiverState:
         elif frame.message_type is MessageType.MISSION_COMMIT:
             self._commit(frame.command_id, frame.payload, now)
 
-        self._seen[dedup_key] = None
+        self._seen[dedup_key] = self._transaction_identity(frame)
         self._seen.move_to_end(dedup_key)
         while len(self._seen) > self.history_limit:
             self._seen.popitem(last=False)
         return True
 
     def _prepare_now(self, now):
-        now = float(now)
-        if self._last_now is not None and now < self._last_now:
+        clock_now = float(self._clock())
+        if now is None:
+            resolved = clock_now
+            if self._clock_offset is not None:
+                resolved += self._clock_offset
+            new_offset = self._clock_offset
+        else:
+            resolved = float(now)
+            new_offset = resolved - clock_now
+        if self._last_now is not None and resolved < self._last_now:
             raise ValueError("now must be monotonic")
-        self._last_now = now
-        return now
+        self._clock_offset = new_offset
+        self._last_now = resolved
+        return resolved
 
     def _expire(self, now):
         expired = [
@@ -178,6 +193,19 @@ class ReceiverState:
         ]
         for identity in expired:
             del self._missions[identity]
+            for dedup_key, transaction in list(self._seen.items()):
+                if transaction == identity:
+                    del self._seen[dedup_key]
+
+    @staticmethod
+    def _transaction_identity(frame):
+        if frame.message_type in (
+            MessageType.MISSION_BEGIN,
+            MessageType.MISSION_ITEM,
+            MessageType.MISSION_COMMIT,
+        ):
+            return (frame.command_id, frame.payload["mission_id"])
+        return None
 
     def _require_mission(self, command_id, mission_id):
         mission = self._missions.get((command_id, mission_id))
