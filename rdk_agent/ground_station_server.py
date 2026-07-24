@@ -17,6 +17,15 @@ AIRCRAFT_STATE_PATH = ROOT / "aircraft_state.json"
 AIRCRAFT_GATEWAY = None
 
 
+def read_aircraft_snapshot(gateway=None, state_path=AIRCRAFT_STATE_PATH) -> dict:
+    if gateway is not None:
+        return gateway.snapshot()
+    try:
+        return json.loads(state_path.read_text())
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        return {"online": False, "state": "waiting"}
+
+
 class Handler(SimpleHTTPRequestHandler):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, directory=str(WEB_ROOT), **kwargs)
@@ -42,10 +51,10 @@ class Handler(SimpleHTTPRequestHandler):
                 self.json_response(200, {"online": False, "updated_at": 0, "telemetry": {}})
             return
         if parsed.path == "/api/aircraft":
-            if AIRCRAFT_GATEWAY:
-                self.json_response(200, AIRCRAFT_GATEWAY.snapshot())
-            else:
-                self.json_response(503, {"ok": False, "error": "aircraft gateway not started"})
+            self.json_response(
+                200,
+                read_aircraft_snapshot(AIRCRAFT_GATEWAY, AIRCRAFT_STATE_PATH),
+            )
             return
         return super().do_GET()
 
@@ -66,14 +75,22 @@ class Handler(SimpleHTTPRequestHandler):
         self.json_response(200, {"ok": True, "command": command.__dict__})
 
 
-def main(argv=None) -> int:
+def parse_args(argv=None):
     parser = argparse.ArgumentParser(description="Rover ground station web server")
     parser.add_argument("--host", default="0.0.0.0")
     parser.add_argument("--port", type=int, default=8080)
-    parser.add_argument("--aircraft-udp-port", type=int, action="append", default=[14560, 14550])
-    args = parser.parse_args(argv)
+    parser.add_argument("--aircraft-udp-port", type=int, action="append", default=[])
+    return parser.parse_args(argv)
+
+
+def main(argv=None) -> int:
+    args = parse_args(argv)
     global AIRCRAFT_GATEWAY
-    AIRCRAFT_GATEWAY = start_aircraft_gateway(args.aircraft_udp_port, AIRCRAFT_STATE_PATH)
+    if args.aircraft_udp_port:
+        AIRCRAFT_GATEWAY = start_aircraft_gateway(
+            args.aircraft_udp_port,
+            AIRCRAFT_STATE_PATH,
+        )
     WEB_ROOT.mkdir(parents=True, exist_ok=True)
     server = ThreadingHTTPServer((args.host, args.port), Handler)
     print(f"ground station listening on http://{args.host}:{args.port}")
