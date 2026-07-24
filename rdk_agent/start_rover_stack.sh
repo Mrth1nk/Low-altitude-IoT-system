@@ -34,12 +34,25 @@ fi
 pkill -f "tuya_rover_agent.py run" 2>/dev/null || true
 pkill -f "ground_station_server.py" 2>/dev/null || true
 
-nohup python -u tuya_rover_agent.py run > rover_agent.log 2>&1 &
-echo "$!" > rover_agent.pid
+agent_pid=
+ground_station_pid=
+cleanup() {
+  trap - EXIT INT TERM
+  [[ -n "$agent_pid" ]] && kill "$agent_pid" 2>/dev/null || true
+  [[ -n "$ground_station_pid" ]] && kill "$ground_station_pid" 2>/dev/null || true
+  wait "$agent_pid" "$ground_station_pid" 2>/dev/null || true
+}
+trap cleanup EXIT INT TERM
 
-nohup python -u ground_station_server.py --host 0.0.0.0 --port "$GROUND_STATION_PORT" > ground_station.log 2>&1 &
-echo "$!" > ground_station.pid
+python -u tuya_rover_agent.py run > rover_agent.log 2>&1 &
+agent_pid=$!
+echo "$agent_pid" > rover_agent.pid
+
+python -u ground_station_server.py --host 0.0.0.0 --port "$GROUND_STATION_PORT" > ground_station.log 2>&1 &
+ground_station_pid=$!
+echo "$ground_station_pid" > ground_station.pid
 
 echo "rover agent pid: $(cat rover_agent.pid)"
 echo "ground station pid: $(cat ground_station.pid)"
 echo "ground station: http://$(hostname -I | awk '{print $1}'):$GROUND_STATION_PORT/"
+wait -n "$agent_pid" "$ground_station_pid"

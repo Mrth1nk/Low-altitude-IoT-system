@@ -207,6 +207,12 @@ class StartRoverStackTests(unittest.TestCase):
         self.assertIn('/home/sunrise/uav_tuya_agent/.venv', source)
         self.assertIn('"$RDK_VENV/bin/activate"', source)
 
+    def test_start_script_remains_in_foreground_for_systemd(self):
+        source = (ROOT / "rdk_agent" / "start_rover_stack.sh").read_text()
+        self.assertNotIn("nohup python", source)
+        self.assertIn("wait -n", source)
+        self.assertIn("trap cleanup EXIT INT TERM", source)
+
 
 if __name__ == "__main__":
     unittest.main()
