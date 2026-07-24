@@ -11,6 +11,8 @@ BASE_WAS_ENABLED=unknown
 BASE_WAS_ACTIVE=unknown
 AIRCRAFT_WAS_ENABLED=unknown
 AIRCRAFT_WAS_ACTIVE=unknown
+LEGACY_ROVER_WAS_ENABLED=unknown
+LEGACY_ROVER_WAS_ACTIVE=unknown
 
 while (($#)); do
   case "$1" in
@@ -78,6 +80,8 @@ rollback() {
       "$BASE_WAS_ENABLED" "$BASE_WAS_ACTIVE"
     restore_service_state low-altitude-rdk-aircraft-network.service \
       "$AIRCRAFT_WAS_ENABLED" "$AIRCRAFT_WAS_ACTIVE"
+    restore_service_state uav-rover-stack.service \
+      "$LEGACY_ROVER_WAS_ENABLED" "$LEGACY_ROVER_WAS_ACTIVE"
   fi
   return "$rc"
 }
@@ -111,6 +115,8 @@ if ((!DRY_RUN)); then
   BASE_WAS_ACTIVE="$(unit_active_state low-altitude-rdk.service)"
   AIRCRAFT_WAS_ENABLED="$(unit_enabled_state low-altitude-rdk-aircraft-network.service)"
   AIRCRAFT_WAS_ACTIVE="$(unit_active_state low-altitude-rdk-aircraft-network.service)"
+  LEGACY_ROVER_WAS_ENABLED="$(unit_enabled_state uav-rover-stack.service)"
+  LEGACY_ROVER_WAS_ACTIVE="$(unit_active_state uav-rover-stack.service)"
 fi
 
 BACKUP_DIR="$(dest /var/backups/low-altitude-iot)/$(date +%Y%m%d%H%M%S)"
@@ -165,6 +171,7 @@ for unit in low-altitude-rdk.service low-altitude-rdk-aircraft-network.service; 
 done
 
 run systemctl daemon-reload
+run systemctl disable --now uav-rover-stack.service
 run systemctl enable --now low-altitude-rdk.service
 if ((ENABLE_DEMO)); then
   run systemctl enable low-altitude-rdk-aircraft-network.service

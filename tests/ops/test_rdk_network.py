@@ -169,6 +169,9 @@ class InstallerTests(unittest.TestCase):
         self.assertIn("BASE_WAS_ENABLED", source)
         self.assertIn("AIRCRAFT_WAS_ENABLED", source)
         self.assertIn("restore_service_state", source)
+        self.assertIn("LEGACY_ROVER_WAS_ENABLED", source)
+        self.assertIn("LEGACY_ROVER_WAS_ACTIVE", source)
+        self.assertIn("restore_service_state uav-rover-stack.service", source)
 
     def test_rollback_never_copies_backup_root_metadata_onto_root(self):
         source = INSTALL.read_text()
@@ -189,6 +192,12 @@ class InstallerTests(unittest.TestCase):
             "systemctl enable --now low-altitude-rdk-aircraft-network.service",
             source,
         )
+
+    def test_installer_stops_legacy_rover_before_starting_replacement(self):
+        source = INSTALL.read_text()
+        stop = source.index("systemctl disable --now uav-rover-stack.service")
+        start = source.index("systemctl enable --now low-altitude-rdk.service")
+        self.assertLess(stop, start)
 
 
 class StartRoverStackTests(unittest.TestCase):
