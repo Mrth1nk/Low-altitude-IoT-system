@@ -196,8 +196,18 @@ class InstallerTests(unittest.TestCase):
     def test_installer_stops_legacy_rover_before_starting_replacement(self):
         source = INSTALL.read_text()
         stop = source.index("systemctl disable --now uav-rover-stack.service")
-        start = source.index("systemctl enable --now low-altitude-rdk.service")
+        start = source.index("systemctl restart low-altitude-rdk.service")
         self.assertLess(stop, start)
+
+    def test_installer_restarts_active_base_service_to_load_new_release(self):
+        source = INSTALL.read_text()
+        enable = source.index("systemctl enable low-altitude-rdk.service")
+        restart = source.index("systemctl restart low-altitude-rdk.service")
+        self.assertLess(enable, restart)
+        self.assertNotIn(
+            "systemctl enable --now low-altitude-rdk.service",
+            source,
+        )
 
 
 class StartRoverStackTests(unittest.TestCase):

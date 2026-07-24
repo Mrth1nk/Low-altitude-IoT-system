@@ -172,7 +172,8 @@ done
 
 run systemctl daemon-reload
 run systemctl disable --now uav-rover-stack.service
-run systemctl enable --now low-altitude-rdk.service
+run systemctl enable low-altitude-rdk.service
+run systemctl restart low-altitude-rdk.service
 if ((ENABLE_DEMO)); then
   run systemctl enable low-altitude-rdk-aircraft-network.service
   if ((DRY_RUN)); then
