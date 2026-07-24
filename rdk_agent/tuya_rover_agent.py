@@ -9,6 +9,7 @@ import paho.mqtt.client as mqtt
 
 from aircraft_gateway import start_aircraft_gateway
 from aircraft_link import AircraftLink
+from aircraft_transport import AircraftTransport, legacy_gateway_ports
 from command_router import CloudCommand, CommandRejected, CommandRouter
 from l610 import check_l610, ensure_l610_usbnet, read_lte_rssi
 from mavlink_rover import RoverMavlink, discover_mavlink_urls
@@ -161,12 +162,8 @@ def read_optical_state(path: Path = AIRCRAFT_STATE_PATH) -> str:
     return "locked" if updated_at and time.time() - updated_at < 3 else "blocked"
 
 
-def start_aircraft_state_gateway(config: dict):
-    ports = config.get("aircraft_udp_ports", [14560, 14550])
-    if isinstance(ports, str):
-        ports = [int(part.strip()) for part in ports.split(",") if part.strip()]
-    else:
-        ports = [int(port) for port in ports]
+def start_aircraft_state_gateway(config: dict, transport_port: int = 14560):
+    ports = legacy_gateway_ports(config, transport_port)
     print(f"starting aircraft UDP gateway ports={ports} state={AIRCRAFT_STATE_PATH}", flush=True)
     return start_aircraft_gateway(ports, AIRCRAFT_STATE_PATH)
 
@@ -183,13 +180,23 @@ def run_agent(config: dict) -> int:
     telemetry = RoverTelemetry()
     state_path = Path(config["state_path"])
     command_path = Path(config["command_path"])
-    aircraft_gateway = start_aircraft_state_gateway(config)
+    aircraft_local_port = int(config.get("aircraft_link_local_port", 14560))
+    aircraft_gateway = start_aircraft_state_gateway(config, aircraft_local_port)
     connected = False
     pending: list[CloudCommand] = []
     manual_active_until = 0.0
     aircraft_link = AircraftLink(
         max_attempts=int(config.get("aircraft_max_attempts", 4)),
         retry_interval=float(config.get("aircraft_retry_interval_sec", 0.5)),
+    )
+    aircraft_transport = AircraftTransport(
+        aircraft_link,
+        local_host=str(config.get("aircraft_link_local_host", "0.0.0.0")),
+        local_port=aircraft_local_port,
+        peer=(
+            str(config.get("aircraft_peer_host", "192.168.4.1")),
+            int(config.get("aircraft_peer_port", 14555)),
+        ),
     )
 
     class RoverExecutor:
@@ -209,7 +216,7 @@ def run_agent(config: dict) -> int:
     router = CommandRouter(
         RoverExecutor(),
         aircraft_link,
-        optical_state=lambda: read_optical_state(AIRCRAFT_STATE_PATH),
+        optical_state=aircraft_transport.optical_state,
         max_age_seconds=float(config.get("command_max_age_sec", 10.0)),
     )
 
@@ -278,6 +285,16 @@ def run_agent(config: dict) -> int:
                     f"message={message}",
                     flush=True,
                 )
+            transaction = aircraft_transport.pump(now)
+            telemetry.transaction_stage = str(transaction.get("stage", "idle"))
+            telemetry.transaction_id = str(
+                transaction.get("transaction_id", telemetry.transaction_id)
+            )
+            telemetry.transaction_pending = int(transaction.get("pending", 0))
+            transaction_error = str(transaction.get("error", ""))
+            if transaction_error:
+                telemetry.mission_status = telemetry.transaction_stage
+                telemetry.fault_text = transaction_error
             if telemetry.last_command in ("stop", "arm") and rover.connect(timeout=0.05):
                 rover.neutral()
             if telemetry.last_command in ("manual", "drive") and (telemetry.steering or telemetry.throttle) and time.time() > manual_active_until:

@@ -13,6 +13,8 @@ class AircraftLink:
         self.sender = RetrySender(max_attempts, retry_interval)
         self._next_sequence = 0
         self._stage = "idle"
+        self._error = ""
+        self._transaction_id = ""
 
     @property
     def pending_count(self):
@@ -32,6 +34,8 @@ class AircraftLink:
         if command.target != "aircraft":
             raise ValueError("AircraftLink accepts aircraft commands only")
         now = 0.0 if now is None else float(now)
+        self._transaction_id = str(command.command_id)
+        self._error = ""
         if command.action == "mission":
             return self._stage_mission(command, now)
         self._queue(
@@ -113,8 +117,15 @@ class AircraftLink:
 
     def due_bytes(self, now):
         due = self.sender.due(now)
+        exhausted = self.sender.pop_exhausted()
         if due:
             self._stage = "awaiting_ack"
+        if exhausted:
+            command_id, sequence = exhausted[-1]
+            self._stage = "retry_exhausted"
+            self._error = (
+                f"command {command_id} sequence {sequence} retry exhausted"
+            )
         return [encode_frame(frame) for frame in due]
 
     def accept_ack(self, data):
@@ -128,5 +139,27 @@ class AircraftLink:
             self._stage = "acknowledged"
         return accepted
 
+    def accept_response(self, frame):
+        if not isinstance(frame, Frame):
+            raise TypeError("response must be a Frame")
+        if frame.message_type is MessageType.ACK:
+            return self.accept_ack(frame)
+        if frame.message_type is not MessageType.NACK:
+            return False
+        accepted = self.sender.acknowledge(
+            frame.command_id, frame.payload["acked_sequence"]
+        )
+        if accepted:
+            self._stage = "nacked"
+            self._error = str(frame.payload["reason"])[:120]
+        return accepted
+
     def transaction_state(self):
-        return {"stage": self._stage, "pending": self.pending_count}
+        state = {
+            "stage": self._stage,
+            "pending": self.pending_count,
+            "transaction_id": self._transaction_id,
+        }
+        if self._error:
+            state["error"] = self._error
+        return state

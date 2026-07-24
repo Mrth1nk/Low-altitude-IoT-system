@@ -91,9 +91,10 @@ class AircraftLinkTests(unittest.TestCase):
         self.assertEqual(len(first), 1)
         self.assertEqual(self.link.due_bytes(now=0.5), [])
         self.assertEqual(self.link.due_bytes(now=1.0), first)
-        self.assertEqual(
-            self.link.transaction_state(), {"stage": "awaiting_ack", "pending": 1}
-        )
+        state = self.link.transaction_state()
+        self.assertEqual(state["stage"], "awaiting_ack")
+        self.assertEqual(state["pending"], 1)
+        self.assertEqual(state["transaction_id"], str(self.command_id))
 
     def test_rejects_mission_item_count_beyond_protocol_bound(self):
         oversized = [mission_items()[0]] * 101

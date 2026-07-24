@@ -2,6 +2,15 @@
 set -euo pipefail
 
 cd "$(dirname "$0")"
+REPO_PARENT="$(cd .. && pwd)"
+export PYTHONPATH="$REPO_PARENT${PYTHONPATH:+:$PYTHONPATH}"
+
+if [ "${IMPORT_CHECK_ONLY:-0}" = "1" ]; then
+  "${PYTHON_BIN:-python3}" -c "import shared_protocol; import aircraft_link; import aircraft_transport; import command_router"
+  echo "runtime imports ok"
+  exit 0
+fi
+
 source .venv/bin/activate
 GROUND_STATION_PORT="${GROUND_STATION_PORT:-8081}"
 

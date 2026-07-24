@@ -56,7 +56,7 @@ class TuyaAuthTests(unittest.TestCase):
             tuya_rover_agent.start_aircraft_gateway = original_gateway
 
         self.assertEqual(gateway, "gateway")
-        self.assertEqual(calls[0][0], [14560, 14550])
+        self.assertEqual(calls[0][0], [14550])
         self.assertEqual(calls[0][1], tuya_rover_agent.AIRCRAFT_STATE_PATH)
 
 

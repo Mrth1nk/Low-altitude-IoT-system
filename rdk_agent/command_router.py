@@ -114,3 +114,23 @@ class CommandRouter:
                 raise CommandRejected("aircraft command rejected: optical link blocked")
             return self.aircraft_link.execute(command)
         return self.rover_executor.execute(command)
+
+
+class RuntimeCommandAPI:
+    """Callable boundary for a future full-mission ground-station endpoint."""
+
+    def __init__(self, router, clock=None):
+        self.router = router
+        self.clock = clock or time.time
+
+    def submit_mission(self, mission_payload, command_id=None):
+        if not isinstance(mission_payload, dict):
+            raise TypeError("mission payload must be an object")
+        command = CloudCommand(
+            command_id or uuid.uuid4(),
+            self.clock(),
+            "aircraft",
+            "mission",
+            dict(mission_payload),
+        )
+        return self.router.route(command)
