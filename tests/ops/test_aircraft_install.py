@@ -75,6 +75,7 @@ class AircraftServiceTests(unittest.TestCase):
         self.assertIn("readlink -f", source)
         self.assertIn("udevadm info", source)
         self.assertIn("compgen -G", source)
+        self.assertIn('[[ -e "$pattern" || -L "$pattern" ]]', source)
         self.assertIn("device is busy", source)
 
 
@@ -262,6 +263,7 @@ class AircraftInstallerTests(unittest.TestCase):
         self.assertNotIn('cp -a "$BACKUP_DIR/root/." "$(dest /)"', source)
         self.assertIn('for top_level in "$BACKUP_DIR/root"/*', source)
         self.assertIn("HEALTH_ATTEMPTS", source)
+        self.assertTrue(source.startswith("#!/usr/bin/env bash\nset -Eeuo pipefail"))
         self.assertIn("mktemp", source)
         self.assertIn("mv -f", source)
 

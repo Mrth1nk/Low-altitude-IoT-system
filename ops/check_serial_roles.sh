@@ -31,9 +31,13 @@ done
 resolve_unique_by_id() {
   local pattern="$1" expected="$2" label="$3"
   local matches=() candidate resolved
-  while IFS= read -r candidate; do
-    [[ -n "$candidate" ]] && matches+=("$candidate")
-  done < <(compgen -G "$pattern" || true)
+  if [[ -e "$pattern" || -L "$pattern" ]]; then
+    matches+=("$pattern")
+  else
+    while IFS= read -r candidate; do
+      [[ -n "$candidate" ]] && matches+=("$candidate")
+    done < <(compgen -G "$pattern" || true)
+  fi
   if ((${#matches[@]} != 1)); then
     echo "$label by-id identity is ambiguous or missing: ${#matches[@]} matches" >&2
     return 1
