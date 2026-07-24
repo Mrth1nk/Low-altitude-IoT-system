@@ -1,0 +1,81 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Rover Ground Station</title>
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <header>
+    <div>
+      <h1>Rover Ground Station</h1>
+      <p>RDK X5 · L610 · TuyaLink · ArduPilot Rover</p>
+    </div>
+    <div class="header-actions">
+      <button id="openAircraftBtn" class="secondary">飞机栏</button>
+      <button id="stopBtn" class="danger">STOP</button>
+    </div>
+  </header>
+  <main class="station-layout">
+    <div class="rover-column">
+      <section class="map-panel">
+        <div class="panel-title">小车航点</div>
+        <div id="map">
+          <div class="crosshair"></div>
+          <div id="roverDot"></div>
+        </div>
+        <div class="waypoint-row">
+          <input id="targetLat" placeholder="目标纬度">
+          <input id="targetLng" placeholder="目标经度">
+          <input id="targetSpeed" placeholder="速度 m/s" value="0.5">
+          <button id="gotoBtn">发送航点</button>
+        </div>
+      </section>
+      <section class="control-panel">
+        <div class="panel-title">小车遥控</div>
+        <div class="status-grid rover-status" id="statusGrid"></div>
+        <div class="buttons">
+          <button data-command="arm">解锁</button>
+          <button data-command="disarm">上锁</button>
+          <button data-command="manual">MANUAL</button>
+          <button data-command="guided">GUIDED</button>
+          <button data-command="auto">AUTO</button>
+          <button data-command="hold">HOLD</button>
+        </div>
+        <div class="drive-pad">
+          <button class="drive-btn" data-steering="0" data-throttle="100">前进</button>
+          <button class="drive-btn" data-steering="-75" data-throttle="95">左前</button>
+          <button class="drive-btn" data-steering="75" data-throttle="95">右前</button>
+          <button class="drive-btn" data-steering="-100" data-throttle="0">左转</button>
+          <button class="drive-btn stop" data-steering="0" data-throttle="0">停车</button>
+          <button class="drive-btn" data-steering="100" data-throttle="0">右转</button>
+          <button class="drive-btn" data-steering="0" data-throttle="-100">后退</button>
+        </div>
+        <p class="hint">按住按钮或方向键/WASD 持续遥控，松开自动停车。手动遥控会先切 MANUAL。</p>
+      </section>
+      <section class="log-panel">
+        <div class="panel-title">日志</div>
+        <pre id="log"></pre>
+      </section>
+    </div>
+    <aside class="aircraft-panel" id="aircraftPanel">
+      <div class="aircraft-title-row">
+        <div>
+          <div class="panel-title">飞机链路消息</div>
+          <p>系统同步飞行链路 MAVLink 消息，时间为实际收到时刻。</p>
+        </div>
+      </div>
+      <div class="aircraft-head">
+        <input id="aircraftGateway" value="/api/aircraft" placeholder="RDK 网关 API">
+        <button id="aircraftRefresh">刷新</button>
+      </div>
+      <div class="status-grid" id="aircraftStatusGrid"></div>
+      <div id="aircraftMessages" class="message-window"></div>
+    </aside>
+  </main>
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <script src="/app.js"></script>
+</body>
+</html>

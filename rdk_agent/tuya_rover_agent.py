@@ -1,0 +1,313 @@
+#!/usr/bin/env python3
+import argparse
+import json
+import ssl
+import threading
+import time
+from pathlib import Path
+
+import paho.mqtt.client as mqtt
+
+from aircraft_gateway import start_aircraft_gateway
+from aircraft_commands import send_aircraft_command
+from l610 import check_l610, ensure_l610_usbnet, read_lte_rssi
+from mavlink_rover import RoverMavlink, discover_mavlink_urls
+from rover_state import RoverCommand, RoverTelemetry
+from tuya_auth import build_tuya_credentials, make_topic
+
+CONFIG_PATH = Path.home() / "uav_tuya_agent" / "config.json"
+STATE_PATH = Path.home() / "uav_tuya_agent" / "runtime_state.json"
+COMMAND_PATH = Path.home() / "uav_tuya_agent" / "command_inbox.jsonl"
+AIRCRAFT_STATE_PATH = Path.home() / "uav_tuya_agent" / "aircraft_state.json"
+DEFAULT_HOST = "m1.tuyacn.com"
+DEFAULT_PORT = 8883
+
+
+def load_config(path: Path = CONFIG_PATH) -> dict:
+    if not path.exists():
+        raise SystemExit(f"config not found: {path}")
+    data = json.loads(path.read_text())
+    for key in ("device_id", "device_secret"):
+        if not data.get(key) or str(data[key]).startswith("REPLACE_"):
+            raise SystemExit(f"missing config value: {key} in {path}")
+    data.setdefault("host", DEFAULT_HOST)
+    data.setdefault("port", DEFAULT_PORT)
+    data.setdefault("report_interval_sec", 2)
+    data.setdefault("mavlink_url", "/dev/ttyACM0")
+    data.setdefault("mavlink_baud", 115200)
+    data.setdefault("at_port", "/dev/ttyUSB0")
+    data.setdefault("state_path", str(STATE_PATH))
+    data.setdefault("command_path", str(COMMAND_PATH))
+    return data
+
+
+def mqtt_client(config: dict):
+    creds = build_tuya_credentials(config["device_id"], config["device_secret"])
+    client = mqtt.Client(client_id="tuyalink_" + creds["client_id"], protocol=mqtt.MQTTv311)
+    client.username_pw_set(creds["username"], creds["password"])
+    client.tls_set(cert_reqs=ssl.CERT_REQUIRED, tls_version=ssl.PROTOCOL_TLS_CLIENT)
+    client.enable_logger()
+    return client
+
+
+def extract_property_set(payload: bytes) -> dict:
+    try:
+        doc = json.loads(payload.decode())
+    except Exception:
+        return {}
+    data = doc.get("data", doc.get("payload", {}).get("data", {}))
+    return data if isinstance(data, dict) else {}
+
+
+def append_local_command(command_path: Path, command: RoverCommand) -> None:
+    command_path.parent.mkdir(parents=True, exist_ok=True)
+    with command_path.open("a") as f:
+        f.write(json.dumps(command.__dict__, separators=(",", ":")) + "\n")
+
+
+def consume_local_commands(command_path: Path) -> list[RoverCommand]:
+    if not command_path.exists():
+        return []
+    lines = command_path.read_text().splitlines()
+    command_path.write_text("")
+    commands = []
+    for line in lines:
+        if not line.strip():
+            continue
+        try:
+            commands.append(RoverCommand.from_dict(json.loads(line), source="ground_station"))
+        except Exception:
+            continue
+    return commands
+
+
+def write_state(path: Path, telemetry: RoverTelemetry, connected: bool) -> None:
+    doc = {
+        "online": connected,
+        "updated_at": time.time(),
+        "telemetry": telemetry.data(),
+    }
+    path.write_text(json.dumps(doc, ensure_ascii=False, indent=2))
+
+
+def read_aircraft_summary(path: Path = AIRCRAFT_STATE_PATH) -> dict:
+    try:
+        doc = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return {"aircraft": {"link_active": False, "messages": []}}
+    messages = doc.get("messages") if isinstance(doc.get("messages"), list) else []
+    compact_messages = [
+        {
+            "time": round(float(item.get("time", 0) or 0), 2),
+            "type": str(item.get("type", "MSG"))[:24],
+            "text": str(item.get("text", ""))[:160],
+        }
+        for item in messages[-6:]
+        if isinstance(item, dict)
+    ]
+    updated_at = float(doc.get("updated_at", 0) or 0)
+    age = time.time() - updated_at if updated_at else None
+    link_active = bool(age is not None and age < 3)
+    last_message = ""
+    last_message_time = None
+    if compact_messages:
+        item = compact_messages[-1]
+        last_message = f"{item.get('type', 'MSG')} {item.get('text', '')}"[:160]
+        last_message_time = item.get("time")
+    return {
+        "aircraft": {
+            "link_active": link_active,
+            "last_seen_age_sec": round(age, 2) if age is not None else None,
+            "last_remote": str(doc.get("last_remote", ""))[:64],
+            "packets_received": int(doc.get("packets_received", 0) or 0),
+            "bytes_received": int(doc.get("bytes_received", 0) or 0),
+            "messages": compact_messages,
+        },
+        "aircraft_link": link_active,
+        "aircraft_age": round(age, 1) if age is not None else None,
+        "aircraft_packets": int(doc.get("packets_received", 0) or 0),
+        "aircraft_msg": last_message,
+        "aircraft_msg_time": last_message_time,
+    }
+
+
+def start_aircraft_state_gateway(config: dict):
+    ports = config.get("aircraft_udp_ports", [14560, 14550])
+    if isinstance(ports, str):
+        ports = [int(part.strip()) for part in ports.split(",") if part.strip()]
+    else:
+        ports = [int(port) for port in ports]
+    print(f"starting aircraft UDP gateway ports={ports} state={AIRCRAFT_STATE_PATH}", flush=True)
+    return start_aircraft_gateway(ports, AIRCRAFT_STATE_PATH)
+
+
+def run_agent(config: dict) -> int:
+    ensure_l610_usbnet(config["at_port"])
+    device_id = config["device_id"]
+    report_topic = make_topic(device_id, "thing/property/report")
+    report_response_topic = make_topic(device_id, "thing/property/report_response")
+    property_set_topic = make_topic(device_id, "thing/property/set")
+
+    client = mqtt_client(config)
+    rover = RoverMavlink(discover_mavlink_urls(config.get("mavlink_url")), int(config.get("mavlink_baud", 115200)))
+    telemetry = RoverTelemetry()
+    state_path = Path(config["state_path"])
+    command_path = Path(config["command_path"])
+    aircraft_gateway = start_aircraft_state_gateway(config)
+    connected = False
+    pending: list[RoverCommand] = []
+    manual_active_until = 0.0
+    aircraft_job_lock = threading.Lock()
+    aircraft_job_running = False
+
+    def start_aircraft_job(command: RoverCommand) -> tuple[bool, str]:
+        nonlocal aircraft_job_running
+        with aircraft_job_lock:
+            if aircraft_job_running:
+                return False, "aircraft mission upload already running"
+            aircraft_job_running = True
+
+        def worker() -> None:
+            nonlocal aircraft_job_running
+            try:
+                message = send_aircraft_command(
+                    command.command,
+                    AIRCRAFT_STATE_PATH,
+                    target_lat=command.target_lat,
+                    target_lng=command.target_lng,
+                    target_alt=command.target_speed,
+                )
+                with aircraft_job_lock:
+                    telemetry.mission_status = message
+                    telemetry.fault_text = ""
+                print(f"applied aircraft command async ok=True message={message}", flush=True)
+            except Exception as exc:
+                message = str(exc)
+                with aircraft_job_lock:
+                    telemetry.mission_status = "command_failed"
+                    telemetry.fault_text = message
+                print(f"applied aircraft command async ok=False message={message}", flush=True)
+            finally:
+                with aircraft_job_lock:
+                    aircraft_job_running = False
+
+        threading.Thread(target=worker, daemon=True).start()
+        return True, "aircraft mission upload started"
+
+    def on_connect(client, userdata, flags, rc, properties=None):
+        nonlocal connected
+        connected = rc == 0
+        print(f"MQTT connected rc={rc}")
+        client.subscribe(property_set_topic, qos=1)
+        client.subscribe(report_response_topic, qos=1)
+
+    def on_disconnect(client, userdata, rc, properties=None):
+        nonlocal connected
+        connected = False
+        print(f"MQTT disconnected rc={rc}")
+
+    def on_message(client, userdata, msg):
+        if msg.topic == report_response_topic:
+            print(f"property report response {msg.payload.decode(errors='ignore')}", flush=True)
+            return
+        data = extract_property_set(msg.payload)
+        command = RoverCommand.from_tuya_data(data)
+        pending.append(command)
+        print(f"cloud command {command}")
+
+    client.on_connect = on_connect
+    client.on_disconnect = on_disconnect
+    client.on_message = on_message
+    client.connect(config["host"], int(config["port"]), keepalive=60)
+    client.loop_start()
+
+    next_report = 0.0
+    report_interval = float(config["report_interval_sec"])
+    next_lte = 0.0
+    while True:
+        now = time.time()
+        try:
+            for command in consume_local_commands(command_path):
+                pending.append(command)
+            while pending:
+                command = pending.pop(0)
+                if command.command.startswith("aircraft_"):
+                    if command.command in ("aircraft_goto", "aircraft_goto_test_home"):
+                        ok, message = start_aircraft_job(command)
+                        telemetry.last_command = command.command
+                        telemetry.mission_status = message if ok else "command_failed"
+                        telemetry.fault_text = "" if ok else message
+                        print(f"queued aircraft command ok={ok} message={message}", flush=True)
+                        continue
+                    try:
+                        message = send_aircraft_command(
+                            command.command,
+                            AIRCRAFT_STATE_PATH,
+                            target_lat=command.target_lat,
+                            target_lng=command.target_lng,
+                            target_alt=command.target_speed,
+                        )
+                        ok = True
+                    except Exception as exc:
+                        message = str(exc)
+                        ok = False
+                    telemetry.last_command = command.command
+                    telemetry.mission_status = message if ok else "command_failed"
+                    telemetry.fault_text = "" if ok else message
+                    print(f"applied aircraft command ok={ok} message={message}", flush=True)
+                    continue
+                ok, message = rover.apply(command, telemetry)
+                telemetry.mission_status = message if ok else "command_failed"
+                telemetry.fault_text = "" if ok else message
+                if ok and command.command in ("manual", "drive") and (command.steering or command.throttle):
+                    manual_active_until = time.time() + 1.8
+                if ok and command.command in ("stop", "hold", "brake", "arm"):
+                    manual_active_until = 0.0
+                print(f"applied command ok={ok} message={message}", flush=True)
+            if telemetry.last_command in ("stop", "arm") and rover.connect(timeout=0.05):
+                rover.neutral()
+            if telemetry.last_command in ("manual", "drive") and (telemetry.steering or telemetry.throttle) and time.time() > manual_active_until:
+                if rover.connect(timeout=0.05):
+                    rover.stop()
+                telemetry.steering = 0
+                telemetry.throttle = 0
+                telemetry.control_mode = "standby"
+                telemetry.last_command = "stop"
+                telemetry.mission_status = "manual timeout stopped"
+                telemetry.fault_text = ""
+            telemetry = rover.update_telemetry(telemetry)
+            manual_is_active = telemetry.last_command in ("manual", "drive") and time.time() <= manual_active_until
+            if now >= next_lte and not manual_is_active:
+                telemetry.lte_rssi = read_lte_rssi(config["at_port"])
+                next_lte = now + 10
+            write_state(state_path, telemetry, connected)
+            if now >= next_report:
+                payload = telemetry.tuya_compact_payload(read_aircraft_summary())
+                info = client.publish(report_topic, json.dumps(payload, separators=(",", ":")), qos=1)
+                next_report = now + report_interval
+                print(f"published {report_topic} rc={info.rc} msgId={payload['msgId']}", flush=True)
+        except Exception as exc:
+            telemetry.fault_text = f"agent loop error: {exc}"
+            write_state(state_path, telemetry, connected)
+            print(f"agent loop error: {exc}", flush=True)
+        time.sleep(0.1)
+
+
+def main(argv=None) -> int:
+    parser = argparse.ArgumentParser(description="RDK X5 + L610 + TuyaLink Rover Agent")
+    parser.add_argument("command", choices=["run", "check-l610", "dry-auth"])
+    parser.add_argument("--config", default=str(CONFIG_PATH))
+    parser.add_argument("--at-port", default="/dev/ttyUSB0")
+    args = parser.parse_args(argv)
+    if args.command == "check-l610":
+        return check_l610(args.at_port)
+    config = load_config(Path(args.config))
+    if args.command == "dry-auth":
+        creds = build_tuya_credentials(config["device_id"], config["device_secret"], 1700000000)
+        print(json.dumps({"client_id": creds["client_id"], "username": creds["username"], "password_len": len(creds["password"])}, indent=2))
+        return 0
+    return run_agent(config)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

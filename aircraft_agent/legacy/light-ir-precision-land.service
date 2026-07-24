@@ -1,0 +1,40 @@
+[Unit]
+Description=Light IR Tracker Guided Follow and Precision Landing
+After=network.target dev-v4l-by\x2did.mount
+Wants=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/elf/project/Light/WI-FI/OnboardBridge
+ExecStart=/usr/bin/python3 /home/elf/project/Light/WI-FI/OnboardBridge/ir_precision_land.py --stream
+Restart=always
+RestartSec=2
+User=elf
+Group=elf
+SupplementaryGroups=dialout video input
+Environment=PYTHONUNBUFFERED=1
+Environment=OPTICAL_LINK_STATUS_FILE=/tmp/optical_link_status.json
+Environment=MAV_PORT=/dev/ttyS9
+Environment=MAV_BAUD=57600
+Environment=CAM_ORIENTATION=FORWARD
+Environment=CAM_OFFSET_X=0.04
+Environment=CAM_OFFSET_Y=0.01
+Environment=CONTROL_MODE=GUIDED_VELOCITY
+Environment=LANDING_TARGET_POSITION_VALID=1
+Environment=PRECISION_LAND_MODES=LAND,QLAND
+Environment=ACTIVE_MODES=GUIDED,LAND,QLAND
+Environment=IR_AUTO_THRESHOLD=1
+Environment=IR_AUTO_PERCENTILE=99.7
+Environment=IR_AUTO_MARGIN=8
+Environment=IR_THRESHOLD=210
+Environment=TARGET_HOLD_S=0.35
+Environment=TARGET_HOLD_MAX_FRAMES=8
+Environment=SEND_HZ=15
+Environment=VEL_MAX=0.45
+Environment=VEL_KP_X=0.35
+Environment=VEL_KP_Y=0.35
+StandardOutput=append:/home/elf/project/Light/WI-FI/OnboardBridge/logs/ir_precision_land.service.log
+StandardError=append:/home/elf/project/Light/WI-FI/OnboardBridge/logs/ir_precision_land.service.log
+
+[Install]
+WantedBy=multi-user.target

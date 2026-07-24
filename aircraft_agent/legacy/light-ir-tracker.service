@@ -1,0 +1,22 @@
+[Unit]
+Description=Light IR Beacon Tracker
+After=network.target dev-v4l-by\x2did.mount
+Wants=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/elf/project/Light/WI-FI/OnboardBridge
+ExecStart=/usr/bin/python3 /home/elf/project/Light/WI-FI/OnboardBridge/precision_land_v4.py --stream
+Restart=always
+RestartSec=3
+User=elf
+Group=elf
+SupplementaryGroups=dialout video input
+Environment=PYTHONUNBUFFERED=1
+Environment=OPTICAL_LINK_STATUS_FILE=/tmp/optical_link_status.json
+Environment=CAM_ORIENTATION=FORWARD
+StandardOutput=append:/home/elf/project/Light/WI-FI/OnboardBridge/logs/ir_tracker.service.log
+StandardError=append:/home/elf/project/Light/WI-FI/OnboardBridge/logs/ir_tracker.service.log
+
+[Install]
+WantedBy=multi-user.target

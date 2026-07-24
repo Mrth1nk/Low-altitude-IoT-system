@@ -1,0 +1,104 @@
+# CHANGELOG.md
+
+## 2026-07-23
+
+- Added project maintenance documentation:
+  - `AGENTS.md`
+  - `TASKS.md`
+  - `CHANGELOG.md`
+  - `docs/codex_context.md`
+- Updated the RDK local ground station:
+  - Changed the main dashboard to a left rover / right aircraft split layout.
+  - Made the aircraft message panel always visible instead of requiring a modal.
+  - Removed the live aircraft delay timer from the visible status cards and shows fixed received-message timestamps instead.
+  - Compacts repeated aircraft messages with a count suffix.
+  - Simplified rover status cards for faster scanning.
+  - Increased manual drive button and keyboard throttle output to full-scale forward/reverse.
+- Updated the local Tuya cloud ground station in `tuya_cloud_ground_station/`:
+  - Made the browser ground station layout left rover / right aircraft.
+  - Kept the data source on Tuya Cloud `rover_state` instead of the RDK local API.
+  - Removed the live aircraft delay timer from the visible UI.
+  - Uses stable received/change timestamps for compact cloud aircraft messages.
+  - Increased rover manual drive button and keyboard throttle output to full-scale forward/reverse.
+- Added Tuya cloud ground-station operator features:
+  - Arrival popup with target, rover position, and distance error.
+  - Mission status banner for idle, moving, arrived, GPS wait, and failure states.
+  - Low battery, weak LTE, aircraft-link, and geofence toast alerts.
+  - Cloud command receipt toasts.
+  - Rover GPS track line on the map.
+  - Waypoint queue with send-next workflow.
+  - Electronic geofence radius control.
+- Fixed aircraft mission/waypoint upload path through RDK:
+  - `tuya_rover_agent.py run` now starts the aircraft UDP gateway on `14560` / `14550`.
+  - This removes the hidden dependency on the RDK local `ground_station_server.py`, which was failing when port `8081` was already used by the stereo depth web service.
+  - Mission upload now drains `MISSION_REQUEST(_INT)` and `MISSION_ACK` from the command socket itself while still also checking `aircraft_state.json`.
+  - Added tests for command-socket mission replies and rover-agent aircraft gateway startup.
+  - Deployed the fix to `/home/sunrise/uav_tuya_agent` on the RDK and restarted `uav-rover-stack.service`.
+  - Verified on the RDK `.venv` with `python -m unittest discover -s tests -v` passing 14 tests.
+- Installed `sshpass` locally to simplify repeat SSH/SCP operations during hardware debugging.
+- Fixed Tuya cloud aircraft message truncation:
+  - Confirmed RDK `aircraft_state.json` contained full messages such as `心跳 GUIDED armed=NO sys=1/1`.
+  - Found truncation in `rover_state` compacting, where the payload could fall back to short `aircraft_msg` text.
+  - Kept `rover_state` within the Tuya-accepted size while prioritizing the latest aircraft message text.
+  - Verified RDK property reports returned `code:0` again after an oversized 1600-byte attempt returned `code:2006`.
+  - Added a regression test ensuring compacted cloud state preserves full aircraft message text.
+
+## 2026-07-22
+
+- Built the RDK rover/TuyaLink application in `uav_tuya_agent/`.
+- Added modular Python files:
+  - `tuya_auth.py`
+  - `l610.py`
+  - `rover_state.py`
+  - `mavlink_rover.py`
+  - `tuya_rover_agent.py`
+  - `ground_station_server.py`
+  - `aircraft_gateway.py`
+  - `aircraft_commands.py`
+- Added RDK local web ground station:
+  - `web/index.html`
+  - `web/app.js`
+  - `web/styles.css`
+- Added tests for auth, L610 parsing, rover state, MAVLink rover helpers, aircraft gateway, and aircraft MAVLink2 commands.
+- Added L610 route script `configure_l610_primary.sh`.
+  - Loads `usbnet` and `cdc_ether`.
+  - Sets L610 NetworkManager profile as default route when available.
+  - Sets phone hotspot and `mengchuang` Wi-Fi profiles as `never-default`.
+  - Adds host route to `192.168.4.1` through `wlan0` for the Wi-Fi telemetry module.
+- Added stack starter `start_rover_stack.sh`.
+  - Starts `tuya_rover_agent.py run`.
+  - Starts `ground_station_server.py --host 0.0.0.0 --port 8080`.
+  - Supports `SKIP_L610_CONFIG=1` for systemd service mode.
+- Added boot service installer `install_rdk_boot_services.sh`.
+  - Installs `uav-l610-primary.service`.
+  - Installs `uav-rover-stack.service`.
+  - Runs rover stack as user `sunrise`.
+  - Disables `uav-mengchuang-link.service` by default to preserve SSH during development.
+- Added final-demo `mengchuang` installer `install_mengchuang_boot_service.sh`.
+  - Installs and enables `uav-mengchuang-link.service`.
+  - Connects RDK `wlan0` to `mengchuang`.
+  - Keeps `mengchuang` as `ipv4.never-default yes`.
+- Added Tuya cloud ground station in `tuya_cloud_ground_station/`.
+  - Uses Tuya OpenAPI HMAC signing.
+  - Reads shadow/state/status endpoints.
+  - Refreshes token automatically after token invalid errors.
+  - Sends only allowed command properties.
+- Updated cloud station UI with rover controls, aircraft panel, and command logs.
+- Added compact `rover_state` cloud payload handling so Tuya string fields stay within practical limits.
+- Routed cloud aircraft commands through RDK:
+  - `aircraft_guided`
+  - `aircraft_loiter`
+  - `aircraft_rtl`
+  - `aircraft_land`
+  - `aircraft_arm`
+  - `aircraft_disarm`
+- Fixed aircraft downlink command packet generation:
+  - Removed dependency on the earlier `pymavlink` pack path that could produce empty packets.
+  - Hand-builds MAVLink2 `0xFD` frames.
+  - Mode commands send both `COMMAND_LONG MAV_CMD_DO_SET_MODE` and `SET_MODE`.
+  - Arm/disarm sends `COMMAND_LONG MAV_CMD_COMPONENT_ARM_DISARM`.
+  - Sends repeated packets to recent remote port plus `14555`, `14550`, and `14560`.
+- Verified locally that RDK MAVLink2 command packets can be parsed by the aircraft bridge monitor as `COMMAND_LONG` and `SET_MODE`.
+- On the ELF aircraft bridge, fixed stale optical link status writes by using PID-specific temp files before replacing the status file.
+- Confirmed aircraft bridge telemetry receive path recovered after optical state fix.
+- Known unresolved issue at end of day: RDK L610 ECM interface `enxf04bb3b9ebe5` was observed as `DOWN/unavailable`, leaving Tuya route unreachable until L610 is brought back up.

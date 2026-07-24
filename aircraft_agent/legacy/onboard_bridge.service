@@ -1,0 +1,14 @@
+[Unit]
+Description=UAV WiFi Telemetry MAVLink Bridge
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/elf/project/Light/WI-FI/OnboardBridge
+ExecStart=/usr/bin/python3 /home/elf/project/Light/WI-FI/OnboardBridge/main.py --fc /dev/ttyACM0 --fc-baud 57600 --wifi /dev/ttyUSB0 --wifi-baud 57600 --wifi-mode serial --log /home/elf/project/Light/WI-FI/OnboardBridge/logs/bridge.log
+Restart=always
+RestartSec=3
+User=elf
+
+[Install]
+WantedBy=multi-user.target
