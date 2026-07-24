@@ -1,0 +1,30 @@
+[Unit]
+Description=Low-altitude aircraft link and mission agent
+After=dev-ttyACM0.device dev-ttyUSB0.device
+StartLimitIntervalSec=60
+StartLimitBurst=3
+
+[Service]
+Type=simple
+User=elf
+Group=elf
+SupplementaryGroups=dialout
+WorkingDirectory=/opt/low-altitude-iot/current
+EnvironmentFile=/etc/low-altitude-iot/aircraft.env
+Environment=AIRCRAFT_STATE_DIR=/var/lib/low-altitude-iot
+Environment=AIRCRAFT_RUNTIME_DIR=/run/low-altitude-iot
+ExecStartPre=/usr/local/lib/low-altitude-iot/check_serial_roles.sh aircraft
+ExecStart=/usr/bin/python3 -m aircraft_agent.main
+Restart=on-failure
+RestartSec=2
+StateDirectory=low-altitude-iot
+RuntimeDirectory=low-altitude-iot
+UMask=0077
+DevicePolicy=closed
+DeviceAllow=/dev/ttyACM0 rw
+DeviceAllow=/dev/ttyUSB0 rw
+NoNewPrivileges=yes
+PrivateTmp=yes
+
+[Install]
+WantedBy=multi-user.target

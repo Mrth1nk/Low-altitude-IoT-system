@@ -1,0 +1,28 @@
+[Unit]
+Description=Low-altitude infrared tracking and precision landing
+After=dev-ttyS9.device low-altitude-aircraft.service
+StartLimitIntervalSec=60
+StartLimitBurst=3
+
+[Service]
+Type=simple
+User=elf
+Group=elf
+SupplementaryGroups=dialout video
+WorkingDirectory=/opt/low-altitude-iot/current
+EnvironmentFile=/etc/low-altitude-iot/aircraft.env
+Environment=AIRCRAFT_RUNTIME_DIR=/run/low-altitude-iot
+ExecStartPre=/usr/local/lib/low-altitude-iot/check_serial_roles.sh vision
+ExecStart=/usr/bin/python3 -m vision.runtime
+Restart=on-failure
+RestartSec=2
+RuntimeDirectory=low-altitude-iot
+UMask=0077
+DevicePolicy=closed
+DeviceAllow=/dev/ttyS9 rw
+DeviceAllow=/dev/video0 rw
+NoNewPrivileges=yes
+PrivateTmp=yes
+
+[Install]
+WantedBy=multi-user.target
