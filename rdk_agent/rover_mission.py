@@ -11,6 +11,8 @@ MAV_MISSION_ACCEPTED = 0
 MAV_CMD_NAV_WAYPOINT = 16
 MAV_FRAME_GLOBAL = 0
 MAV_FRAME_GLOBAL_RELATIVE_ALT_INT = 6
+MAV_MISSION_TYPE_MISSION = 0
+MAV_MISSION_STATE_COMPLETE = 5
 
 
 class MissionError(RuntimeError):
@@ -73,6 +75,7 @@ class MissionStatus:
     execution_ready: bool = False
     current_seq: int = 0
     reached_seq: int = 0
+    endpoint_reached: bool = False
     completed: bool = False
     reason: str = ""
 
@@ -94,6 +97,10 @@ class RoverMissionManager:
         retries: int = 2,
         altitude_tolerance: float = 0.25,
         coordinate_tolerance: int = 1,
+        gcs_system: int = 255,
+        gcs_component: int = 0,
+        vehicle_system: int | None = None,
+        vehicle_component: int | None = None,
     ):
         if retries < 0:
             raise ValueError("retries must be non-negative")
@@ -102,6 +109,14 @@ class RoverMissionManager:
         self.retries = int(retries)
         self.altitude_tolerance = float(altitude_tolerance)
         self.coordinate_tolerance = int(coordinate_tolerance)
+        self.gcs_system = int(gcs_system)
+        self.gcs_component = int(gcs_component)
+        self.vehicle_system = (
+            None if vehicle_system is None else int(vehicle_system)
+        )
+        self.vehicle_component = (
+            None if vehicle_component is None else int(vehicle_component)
+        )
         self.status = MissionStatus()
         self.executable_items: list[MissionItem] = []
 
@@ -136,6 +151,9 @@ class RoverMissionManager:
         downloaded = self._download(len(upload_items))
         self._verify(upload_items, downloaded)
 
+        refresh_home = getattr(self.transport, "refresh_home", None)
+        if refresh_home is not None:
+            home_valid = bool(refresh_home(home_valid, self.timeout))
         ready, reason = self._execution_gate(telemetry, home_valid)
         self.executable_items = executable
         self.status.verified = True
@@ -153,12 +171,31 @@ class RoverMissionManager:
         kind = _field(message, "type", "")
         if kind == "MISSION_CURRENT":
             self.status.current_seq = int(_field(message, "seq", 0))
+            if int(_field(message, "mission_state", 0) or 0) == MAV_MISSION_STATE_COMPLETE:
+                self.status.completed = True
         elif kind == "MISSION_ITEM_REACHED":
             seq = int(_field(message, "seq", 0))
             self.status.reached_seq = seq
             if self.executable_items and seq >= self.executable_items[-1].seq:
+                self.status.endpoint_reached = True
+        elif kind == "STATUSTEXT":
+            text = str(_field(message, "text", "")).strip().lower()
+            if self.status.endpoint_reached and "mission complete" in text:
                 self.status.completed = True
-                self.transport.send("SET_MODE", mode="HOLD")
+
+    def publish_status(self, telemetry) -> None:
+        if self.status.completed:
+            telemetry.mission_status = (
+                f"mission complete seq={self.status.reached_seq}"
+            )
+        elif self.status.endpoint_reached:
+            telemetry.mission_status = (
+                f"endpoint reached seq={self.status.reached_seq}"
+            )
+        elif self.status.current_seq:
+            telemetry.mission_status = (
+                f"mission active seq={self.status.current_seq}"
+            )
 
     def _clear(self) -> None:
         for _attempt in range(self.retries + 1):
@@ -189,7 +226,12 @@ class RoverMissionManager:
                 seq = int(_field(message, "seq", -1))
                 if seq not in by_seq:
                     raise MissionDenied(f"flight controller requested invalid seq={seq}")
-                self.transport.send("MISSION_ITEM_INT", item=by_seq[seq])
+                response_type = (
+                    "MISSION_ITEM"
+                    if kind == "MISSION_REQUEST"
+                    else "MISSION_ITEM_INT"
+                )
+                self.transport.send(response_type, item=by_seq[seq])
                 attempts = 0
                 continue
             if kind == "MISSION_ACK":
@@ -228,12 +270,25 @@ class RoverMissionManager:
             actual_seq = int(_field(message, "seq", -1))
             if actual_seq != seq:
                 continue
+            kind = _field(message, "type")
+            raw_x = _field(message, "x", 0)
+            raw_y = _field(message, "y", 0)
+            x = (
+                int(round(float(raw_x) * 1e7))
+                if kind == "MISSION_ITEM"
+                else int(raw_x)
+            )
+            y = (
+                int(round(float(raw_y) * 1e7))
+                if kind == "MISSION_ITEM"
+                else int(raw_y)
+            )
             return MissionItem(
                 seq=actual_seq,
                 frame=int(_field(message, "frame", -1)),
                 command=int(_field(message, "command", -1)),
-                x=int(_field(message, "x", 0)),
-                y=int(_field(message, "y", 0)),
+                x=x,
+                y=y,
                 z=float(_field(message, "z", 0.0)),
                 param1=float(_field(message, "param1", 0.0)),
                 param2=float(_field(message, "param2", 0.0)),
@@ -280,9 +335,12 @@ class RoverMissionManager:
         return (not missing, "" if not missing else "missing " + ", ".join(missing))
 
     def _recv(self):
-        return self.transport.recv(self.timeout)
+        return self._recv_matching(None)
 
     def _recv_until(self, message_types: tuple[str, ...]):
+        return self._recv_matching(message_types)
+
+    def _recv_matching(self, message_types: tuple[str, ...] | None):
         deadline = time.monotonic() + self.timeout
         while True:
             remaining = deadline - time.monotonic()
@@ -291,9 +349,43 @@ class RoverMissionManager:
             message = self.transport.recv(remaining)
             if message is None:
                 return None
-            if _field(message, "type") in message_types:
+            if not self._matches_transaction(message):
+                continue
+            if message_types is None or _field(message, "type") in message_types:
                 return message
             self.observe(message)
+
+    def _matches_transaction(self, message) -> bool:
+        mission_type = _optional_field(message, "mission_type")
+        if (
+            mission_type is not None
+            and int(mission_type) != MAV_MISSION_TYPE_MISSION
+        ):
+            return False
+        target_system = _optional_field(message, "target_system")
+        if target_system is not None and int(target_system) != self.gcs_system:
+            return False
+        target_component = _optional_field(message, "target_component")
+        if (
+            target_component is not None
+            and int(target_component) != self.gcs_component
+        ):
+            return False
+        source_system = _source_field(message, "system")
+        if (
+            source_system is not None
+            and self.vehicle_system is not None
+            and int(source_system) != self.vehicle_system
+        ):
+            return False
+        source_component = _source_field(message, "component")
+        if (
+            source_component is not None
+            and self.vehicle_component is not None
+            and int(source_component) != self.vehicle_component
+        ):
+            return False
+        return True
 
 
 def _field(message, name: str, default=None):
@@ -309,3 +401,20 @@ def _ack_result(message) -> int:
     if isinstance(message, dict):
         return int(message.get("result", message.get("type_code", -1)))
     return int(getattr(message, "result", getattr(message, "type", -1)))
+
+
+def _optional_field(message, name: str):
+    if isinstance(message, dict):
+        return message.get(name)
+    return getattr(message, name, None)
+
+
+def _source_field(message, part: str):
+    if isinstance(message, dict):
+        return message.get(f"source_{part}")
+    method = getattr(
+        message,
+        "get_srcSystem" if part == "system" else "get_srcComponent",
+        None,
+    )
+    return method() if method else None

@@ -55,6 +55,7 @@ class RoverMavlink:
         self.throttle_trim = 1500
         self.throttle_max = 2000
         self.home_valid = False
+        self.last_home_request = 0.0
         self.mission_manager = None
 
     def connect(self, timeout: float = 2.5) -> bool:
@@ -74,9 +75,12 @@ class RoverMavlink:
                     self.target_component = conn.target_component or 0
                     self.last_heartbeat = time.time()
                     self.mission_manager = RoverMissionManager(
-                        RoverMavlinkTransport(self)
+                        RoverMavlinkTransport(self),
+                        vehicle_system=self.target_system,
+                        vehicle_component=self.target_component,
                     )
                     self.load_rc_params()
+                    RoverMavlinkTransport(self).request_home_position()
                     return True
                 conn.close()
             except Exception:
@@ -144,6 +148,11 @@ class RoverMavlink:
             elif typ in ("MISSION_CURRENT", "MISSION_ITEM_REACHED"):
                 if self.mission_manager is not None:
                     self.mission_manager.observe(msg)
+                    self.mission_manager.publish_status(telemetry)
+            elif typ == "STATUSTEXT":
+                if self.mission_manager is not None:
+                    self.mission_manager.observe(msg)
+                    self.mission_manager.publish_status(telemetry)
         return telemetry
 
     def apply(self, command: RoverCommand, telemetry: RoverTelemetry) -> tuple[bool, str]:
@@ -347,7 +356,11 @@ class RoverMavlink:
         if not self.connect(timeout=0.5):
             raise RuntimeError("flight controller not connected")
         if self.mission_manager is None:
-            self.mission_manager = RoverMissionManager(RoverMavlinkTransport(self))
+            self.mission_manager = RoverMissionManager(
+                RoverMavlinkTransport(self),
+                vehicle_system=self.target_system,
+                vehicle_component=self.target_component,
+            )
         items = [
             MissionItem.from_payload(item, seq=index)
             for index, item in enumerate(raw_items, 1)
@@ -360,8 +373,9 @@ class RoverMavlink:
 class RoverMavlinkTransport:
     """Adapter that keeps RoverMavlink as the sole connection owner."""
 
-    def __init__(self, rover: RoverMavlink):
+    def __init__(self, rover: RoverMavlink, clock=None):
         self.rover = rover
+        self.clock = clock or time.monotonic
 
     def recv(self, timeout: float):
         return self.rover.conn.recv_match(blocking=True, timeout=timeout)
@@ -384,8 +398,45 @@ class RoverMavlinkTransport:
                 )
             except TypeError:
                 mav.mission_count_send(system, component, int(fields["count"]))
-        elif message_type == "MISSION_ITEM_INT":
+        elif message_type in ("MISSION_ITEM", "MISSION_ITEM_INT"):
             item = fields["item"]
+            if message_type == "MISSION_ITEM":
+                try:
+                    mav.mission_item_send(
+                        system,
+                        component,
+                        item.seq,
+                        item.frame,
+                        item.command,
+                        1 if item.is_home else 0,
+                        item.autocontinue,
+                        item.param1,
+                        item.param2,
+                        item.param3,
+                        item.param4,
+                        item.x / 1e7,
+                        item.y / 1e7,
+                        item.z,
+                        mission_type,
+                    )
+                except TypeError:
+                    mav.mission_item_send(
+                        system,
+                        component,
+                        item.seq,
+                        item.frame,
+                        item.command,
+                        1 if item.is_home else 0,
+                        item.autocontinue,
+                        item.param1,
+                        item.param2,
+                        item.param3,
+                        item.param4,
+                        item.x / 1e7,
+                        item.y / 1e7,
+                        item.z,
+                    )
+                return
             try:
                 mav.mission_item_int_send(
                     system,
@@ -439,3 +490,44 @@ class RoverMavlinkTransport:
             self.rover.set_mode(str(fields["mode"]))
         else:
             raise ValueError(f"unsupported Rover MAVLink message {message_type}")
+
+    def request_home_position(self) -> bool:
+        now = self.clock()
+        if now - self.rover.last_home_request < 1.0:
+            return False
+        self.rover.last_home_request = now
+        self.rover.conn.mav.command_long_send(
+            self.rover.target_system,
+            self.rover.target_component,
+            getattr(getattr(mavutil, "mavlink", None), "MAV_CMD_GET_HOME_POSITION", 410),
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+        )
+        return True
+
+    def refresh_home(self, current: bool, timeout: float) -> bool:
+        self.request_home_position()
+        deadline = self.clock() + timeout
+        while self.clock() < deadline:
+            message = self.recv(max(0.0, deadline - self.clock()))
+            if message is None:
+                break
+            getter = getattr(message, "get_type", None)
+            kind = getter() if getter else ""
+            if kind != "HOME_POSITION":
+                if self.rover.mission_manager is not None:
+                    self.rover.mission_manager.observe(message)
+                continue
+            valid = bool(
+                abs(int(getattr(message, "latitude", 0) or 0)) > 0
+                and abs(int(getattr(message, "longitude", 0) or 0)) > 0
+            )
+            self.rover.home_valid = valid
+            return valid
+        return bool(current or self.rover.home_valid)
