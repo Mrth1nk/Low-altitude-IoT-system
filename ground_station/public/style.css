@@ -171,6 +171,34 @@ input {
   border-bottom: 1px solid #edf1f5;
   font-size: 11px;
 }
+
+.waypoint-icon {
+  background: transparent;
+  border: 0;
+}
+
+.waypoint-icon span {
+  align-items: center;
+  border: 2px solid #fff;
+  border-radius: 50%;
+  box-shadow: 0 1px 4px rgb(15 23 42 / 35%);
+  color: #fff;
+  display: flex;
+  font-size: 12px;
+  font-weight: 800;
+  height: 28px;
+  justify-content: center;
+  line-height: 1;
+  width: 28px;
+}
+
+.waypoint-icon.rover span {
+  background: #087f72;
+}
+
+.waypoint-icon.aircraft span {
+  background: #2463df;
+}
 .queue-row.current { background: #eaf2ff; color: #174ea6; }
 .queue-row span { overflow-wrap: anywhere; }
 .status-block { display: grid; grid-template-columns: 1fr; gap: 6px; margin-top: 7px; }

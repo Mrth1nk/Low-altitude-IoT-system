@@ -49,6 +49,7 @@ let aircraftPath = null;
 let roverTrackLine = null;
 let fenceCircle = null;
 let fallbackMarker = null;
+const waypointMarkers = {rover: [], aircraft: []};
 let mapFallback = {...FALLBACK};
 let roverTrack = [];
 let arrivalKey = "";
@@ -348,6 +349,27 @@ function redrawRoutes() {
   if (!map) return;
   roverPath.setLatLngs(routes.rover.map((point) => [point.lat, point.lng]));
   aircraftPath.setLatLngs(routes.aircraft.map((point) => [point.lat, point.lng]));
+  for (const vehicle of ["rover", "aircraft"]) {
+    for (const marker of waypointMarkers[vehicle]) map.removeLayer(marker);
+    waypointMarkers[vehicle].length = 0;
+    routes[vehicle].forEach((point, index) => {
+      const color = vehicle === "rover" ? "rover" : "aircraft";
+      const marker = L.marker([point.lat, point.lng], {
+        icon: L.divIcon({
+          className: `waypoint-icon ${color}`,
+          html: `<span>${index + 1}</span>`,
+          iconSize: [28, 28],
+          iconAnchor: [14, 14],
+        }),
+        keyboard: false,
+        zIndexOffset: 500 + index,
+      }).addTo(map).bindTooltip(
+        `${vehicle === "rover" ? "小车" : "飞机"}航点 ${index + 1}`,
+        {direction: "top", offset: [0, -12]},
+      );
+      waypointMarkers[vehicle].push(marker);
+    });
+  }
   const center = routes.rover[0] || currentTarget;
   fenceCircle.setLatLng([center.lat, center.lng]);
   fenceCircle.setRadius(clamp(Number(els.fenceRadius.value), 5, 500));
