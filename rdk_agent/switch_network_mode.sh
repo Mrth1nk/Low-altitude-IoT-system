@@ -39,3 +39,9 @@ esac
 
 nmcli -t -f DEVICE,STATE,CONNECTION dev status
 ip -br addr show dev "$WIFI_IFACE"
+
+# Recreate the Tuya MQTT session after NetworkManager changes link state.
+# A half-open TLS socket can otherwise keep accepting local publishes while
+# the cloud shadow no longer advances.
+sleep "${MQTT_RECONNECT_DELAY_SEC:-1}"
+systemctl try-restart low-altitude-rdk.service

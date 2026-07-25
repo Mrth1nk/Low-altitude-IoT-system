@@ -27,6 +27,8 @@ class AircraftLink:
         self._revision = 0
         self._terminal = OrderedDict()
         self._terminal_limit = int(history_limit)
+        self._fragment_transactions = set()
+        self._fragment_commit = set()
 
     @property
     def pending_count(self):
@@ -39,12 +41,42 @@ class AircraftLink:
     def execute(self, command, now=None):
         if command.target != "aircraft":
             raise ValueError("AircraftLink accepts aircraft commands only")
-        if self._active_command_id is not None:
+        fragment_types = {
+            "mission_begin": MessageType.MISSION_BEGIN,
+            "mission_item": MessageType.MISSION_ITEM,
+            "mission_commit": MessageType.MISSION_COMMIT,
+        }
+        is_fragment = command.action in fragment_types
+        if self._active_command_id is not None and not (
+            is_fragment and command.command_id == self._active_command_id
+        ):
             raise ValueError("aircraft transaction already active")
-        if command.command_id in self._terminal:
+        if is_fragment and command.command_id in self._fragment_transactions:
+            self._active_command_id = None
+        if command.command_id in self._terminal and not is_fragment:
             raise ValueError("aircraft transaction is already terminal")
         now = 0.0 if now is None else float(now)
-        if command.action == "mission":
+        if is_fragment:
+            payload = dict(command.payload)
+            if command.action == "mission_item":
+                payload = self._mission_item(
+                    str(payload["mission_id"]),
+                    int(payload["index"]),
+                    payload,
+                )
+            frames = [
+                self._frame(
+                    fragment_types[command.action],
+                    command.command_id,
+                    payload,
+                    0,
+                )
+            ]
+            self._fragment_transactions.add(command.command_id)
+            if command.action == "mission_commit":
+                self._fragment_commit.add(command.command_id)
+            stage = command.action
+        elif command.action == "mission":
             frames = self._build_mission(command)
             stage = "staged"
         else:
@@ -194,7 +226,16 @@ class AircraftLink:
             and self.pending_count == 0
             and frame.command_id == self._active_command_id
         ):
-            self._set_terminal(frame.command_id, "acknowledged", "")
+            if (
+                frame.command_id in self._fragment_transactions
+                and frame.command_id not in self._fragment_commit
+            ):
+                self._active_command_id = None
+                self._set_stage("fragment_acknowledged")
+            else:
+                self._fragment_transactions.discard(frame.command_id)
+                self._fragment_commit.discard(frame.command_id)
+                self._set_terminal(frame.command_id, "acknowledged", "")
         return accepted
 
     def accept_response(self, frame):

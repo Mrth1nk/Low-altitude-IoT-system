@@ -10,9 +10,12 @@ from pathlib import Path
 CRC_EXTRA = {
     0: 50,
     11: 89,
+    43: 132,
     44: 221,
     45: 232,
+    47: 153,
     48: 41,
+    51: 196,
     75: 158,
     76: 152,
     73: 38,
@@ -230,6 +233,33 @@ def _build_mission_clear_all(*, target_system: int, target_component: int) -> by
     return _build_mavlink2_packet(45, payload)
 
 
+def _build_mission_request_list(*, target_system: int, target_component: int) -> bytes:
+    return _build_mavlink2_packet(
+        43,
+        struct.pack(
+            "<BBB",
+            target_system & 0xFF,
+            target_component & 0xFF,
+            MISSION_TYPE_MISSION,
+        ),
+    )
+
+
+def _build_mission_request_int(
+    *, target_system: int, target_component: int, seq: int
+) -> bytes:
+    return _build_mavlink2_packet(
+        51,
+        struct.pack(
+            "<HBBB",
+            seq & 0xFFFF,
+            target_system & 0xFF,
+            target_component & 0xFF,
+            MISSION_TYPE_MISSION,
+        ),
+    )
+
+
 def _build_mission_item_int(
     *,
     target_system: int,
@@ -294,6 +324,48 @@ def build_aircraft_mission_packets(
     )
 
 
+def build_aircraft_mission_packets_for_items(
+    items: list[dict],
+    *,
+    target_system: int = 1,
+    target_component: int = 1,
+) -> tuple[bytes, bytes, list[bytes]]:
+    if not isinstance(items, list) or not items:
+        raise RuntimeError("aircraft mission requires at least one item")
+    packets = []
+    for seq, item in enumerate(items):
+        lat = float(item.get("lat", item.get("x", 0)))
+        lng = float(item.get("lng", item.get("lon", item.get("y", 0))))
+        alt = float(item.get("alt", item.get("z", 0)))
+        if abs(lat) < 0.000001 or abs(lng) < 0.000001:
+            raise RuntimeError(f"aircraft mission invalid target seq={seq}")
+        if int(item.get("command", MAV_CMD_NAV_WAYPOINT)) != MAV_CMD_NAV_WAYPOINT:
+            raise RuntimeError(f"unsupported aircraft mission command seq={seq}")
+        packets.append(
+            _build_mission_item_int(
+                target_system=target_system,
+                target_component=target_component,
+                seq=seq,
+                lat=lat,
+                lng=lng,
+                alt=alt,
+                current=1 if seq == 0 else 0,
+            )
+        )
+    return (
+        _build_mission_clear_all(
+            target_system=target_system,
+            target_component=target_component,
+        ),
+        _build_mission_count(
+            target_system=target_system,
+            target_component=target_component,
+            count=len(packets),
+        ),
+        packets,
+    )
+
+
 def _mavlink_frames(data: bytes) -> list[tuple[int, bytes]]:
     frames = []
     offset = 0
@@ -327,6 +399,25 @@ def _mission_ack_type(msg_id: int, payload: bytes) -> int | None:
     if msg_id != 47 or len(payload) < 3:
         return None
     return payload[2]
+
+
+def _mission_count_value(msg_id: int, payload: bytes) -> int | None:
+    if msg_id != 44 or len(payload) < 2:
+        return None
+    return struct.unpack_from("<H", payload, 0)[0]
+
+
+def _mission_item_value(msg_id: int, payload: bytes) -> dict | None:
+    if msg_id != 73 or len(payload) < 37:
+        return None
+    values = struct.unpack_from("<ffffiifHHBBBBBB", payload, 0)
+    return {
+        "seq": values[7],
+        "command": values[8],
+        "lat": values[4] / 1e7,
+        "lng": values[5] / 1e7,
+        "alt": values[6],
+    }
 
 
 def _open_udp_socket(local_port: int) -> socket.socket:
@@ -377,6 +468,14 @@ def _drain_mission_socket(sock: socket.socket, events: list[dict]) -> None:
             ack = _mission_ack_type(msg_id, payload)
             if ack is not None:
                 events.append({"type": "MISSION_ACK", "seq": None, "result": ack})
+                continue
+            count = _mission_count_value(msg_id, payload)
+            if count is not None:
+                events.append({"type": "MISSION_COUNT", "count": count})
+                continue
+            item = _mission_item_value(msg_id, payload)
+            if item is not None:
+                events.append({"type": "MISSION_ITEM_INT", **item})
 
 
 def _send_packet_burst(host: str, ports: list[int], local_port: int, packets: list[bytes], repeats: int = 1) -> None:
@@ -639,19 +738,30 @@ def _send_aircraft_auto_mission(
     target_lng: float,
     target_alt: float,
     test_home: bool = False,
+    mission_items: list[dict] | None = None,
+    start_auto: bool = True,
 ) -> str:
-    clear_packet, count_packet, item_packets = build_aircraft_mission_packets(
-        target_lat=target_lat,
-        target_lng=target_lng,
-        target_alt=target_alt,
-        test_home=test_home,
-    )
+    if mission_items is None:
+        clear_packet, count_packet, item_packets = build_aircraft_mission_packets(
+            target_lat=target_lat,
+            target_lng=target_lng,
+            target_alt=target_alt,
+            test_home=test_home,
+        )
+    else:
+        clear_packet, count_packet, item_packets = (
+            build_aircraft_mission_packets_for_items(mission_items)
+        )
     auto_packets = build_aircraft_command_packets("aircraft_auto")
-    ports = list(dict.fromkeys([port, 14555, 14550, 14560]))
+    # The aircraft Wi-Fi bridge receives commands on 14560. Its telemetry
+    # packets originate from 14555 and arrive at the RDK's 14560 listener.
+    # Sending the same mission transaction to several ports races CLEAR/COUNT
+    # packets and can make ArduPilot discard the upload handshake.
+    ports = [14560]
     requested_sequences: set[int] = set()
     socket_events: list[dict] = []
     since = time.time()
-    use_temporary_origin = _should_send_origin_assist(state_path, since, force=test_home)
+    use_temporary_origin = bool(test_home)
     origin_lat = TEST_HOME_LAT if test_home else target_lat
     origin_lng = TEST_HOME_LNG if test_home else target_lng
     origin_alt = TEST_HOME_ALT
@@ -662,6 +772,15 @@ def _send_aircraft_auto_mission(
         if origin_packets:
             _send_packets_on_socket(sock, host, ports, origin_packets, repeats=3)
         _send_packets_on_socket(sock, host, ports, [clear_packet], repeats=1)
+        clear_ack = _wait_mission_ack(
+            state_path,
+            since,
+            time.time() + 3.0,
+            sock=sock,
+            socket_events=socket_events,
+        )
+        if clear_ack not in (None, MISSION_ACK_ACCEPTED):
+            raise RuntimeError(f"aircraft mission clear rejected ack={clear_ack}")
 
         deadline = time.time() + 10.0
         while time.time() < deadline and len(requested_sequences) < len(item_packets):
@@ -706,12 +825,62 @@ def _send_aircraft_auto_mission(
         if ack_type != MISSION_ACK_ACCEPTED:
             raise RuntimeError(f"aircraft mission upload rejected ack={ack_type}")
 
-        _send_packets_on_socket(sock, host, ports, auto_packets, repeats=3)
+        socket_events.clear()
+        request_list = _build_mission_request_list(
+            target_system=1,
+            target_component=1,
+        )
+        _send_packets_on_socket(sock, host, ports, [request_list], repeats=1)
+        readback_deadline = time.time() + 4.0
+        readback_count = None
+        while time.time() < readback_deadline and readback_count is None:
+            _drain_mission_socket(sock, socket_events)
+            for event in socket_events:
+                if event.get("type") == "MISSION_COUNT":
+                    readback_count = int(event.get("count", -1))
+                    break
+            time.sleep(0.03)
+        if readback_count != len(item_packets):
+            raise RuntimeError(
+                "aircraft mission readback count mismatch "
+                f"expected={len(item_packets)} actual={readback_count}"
+            )
+
+        for seq in range(readback_count):
+            socket_events.clear()
+            request_item = _build_mission_request_int(
+                target_system=1,
+                target_component=1,
+                seq=seq,
+            )
+            _send_packets_on_socket(sock, host, ports, [request_item], repeats=1)
+            item_deadline = time.time() + 2.0
+            received = None
+            while time.time() < item_deadline and received is None:
+                _drain_mission_socket(sock, socket_events)
+                received = next(
+                    (
+                        event
+                        for event in socket_events
+                        if event.get("type") == "MISSION_ITEM_INT"
+                        and int(event.get("seq", -1)) == seq
+                    ),
+                    None,
+                )
+                time.sleep(0.03)
+            if received is None:
+                raise RuntimeError(
+                    f"aircraft mission readback item timeout seq={seq}"
+                )
+
+        if start_auto:
+            _send_packets_on_socket(sock, host, ports, auto_packets, repeats=3)
     finally:
         sock.close()
     return (
-        f"aircraft {'test-home ' if test_home else ''}mission uploaded and AUTO sent "
+        f"aircraft {'test-home ' if test_home else ''}mission uploaded and verified "
         f"count={len(item_packets)} "
+        f"auto={'sent' if start_auto else 'not-sent'} "
         f"origin_assist={'yes' if use_temporary_origin else 'no'} "
         f"target={target_lat:.7f},{target_lng:.7f},{max(1.0, min(120.0, float(target_alt))):.1f}m "
         f"from UDP {local_port} to {host}:{','.join(str(p) for p in ports)}"

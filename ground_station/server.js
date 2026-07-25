@@ -109,6 +109,24 @@ function normalizeStatus(result) {
   return normalizeCloudState(result);
 }
 
+function preserveAircraftDetails(previous, next) {
+  const aircraftLinkActive = next?.telemetry?.aircraft_link === true;
+  const nextHasDetails = Boolean(
+    next?.aircraft?.link_active
+    || next?.aircraft?.mode
+    || (Array.isArray(next?.aircraft?.messages) && next.aircraft.messages.length),
+  );
+  const previousHasDetails = Boolean(
+    previous?.aircraft?.link_active
+    || previous?.aircraft?.mode
+    || (Array.isArray(previous?.aircraft?.messages) && previous.aircraft.messages.length),
+  );
+  if (aircraftLinkActive && !nextHasDetails && previousHasDetails) {
+    return {...next, aircraft: previous.aircraft};
+  }
+  return next;
+}
+
 async function fetchState() {
   if (FAKE_TUYA) {
     lastState = fakeState();
@@ -130,16 +148,26 @@ async function fetchState() {
   ];
 
   const errors = [];
+  const states = [];
   for (const endpoint of endpoints) {
     try {
       const doc = await tuyaRequestWithToken("GET", endpoint.path, null);
       const state = normalizeStatus(endpoint.pick(doc));
       state.source = endpoint.path;
-      lastState = state;
-      return state;
+      states.push(state);
     } catch (err) {
       errors.push({path: endpoint.path, error: err.message, detail: err.response || null});
     }
+  }
+
+  if (states.length) {
+    states.sort((left, right) => {
+      const leftTime = Number(left?.telemetry?.updated_at || 0);
+      const rightTime = Number(right?.telemetry?.updated_at || 0);
+      return rightTime - leftTime;
+    });
+    lastState = preserveAircraftDetails(lastState, states[0]);
+    return lastState;
   }
 
   const err = new Error("所有涂鸦状态接口都返回失败");
@@ -148,12 +176,60 @@ async function fetchState() {
 }
 
 async function sendCommand(command) {
+  if (command?.command === "aircraft_mission" && Array.isArray(command?.payload?.items)) {
+    const commandId = command.command_id || crypto.randomUUID();
+    const missionId = String(command.payload.mission_id || `aircraft-${Date.now()}`);
+    const items = command.payload.items.map((item, index) => ({
+      mission_id: missionId,
+      index,
+      lat: Number(item.lat),
+      lon: Number(item.lon ?? item.lng),
+      alt: Number(item.alt),
+      command: Number(item.command ?? 16),
+      frame: Number(item.frame ?? 6),
+      param1: Number(item.param1 ?? 0),
+      param2: Number(item.param2 ?? 0),
+      param3: Number(item.param3 ?? 0),
+      param4: Number(item.param4 ?? 0),
+      autocontinue: item.autocontinue !== false,
+    }));
+    // Match Python json.dumps(..., sort_keys=True, separators=(",", ":")).
+    // Mission floats must keep ".0" because the aircraft-side verifier hashes
+    // normalized Python floats, while JSON.stringify(10.0) emits "10".
+    const floatKeys = new Set(["lat", "lon", "alt", "param1", "param2", "param3", "param4"]);
+    const stable = (value, key = "") => Array.isArray(value)
+      ? `[${value.map((entry) => stable(entry)).join(",")}]`
+      : value && typeof value === "object"
+        ? `{${Object.keys(value).sort().map((name) => `${JSON.stringify(name)}:${stable(value[name], name)}`).join(",")}}`
+        : typeof value === "number" && Number.isFinite(value)
+          ? (floatKeys.has(key) && Number.isInteger(value) ? `${value}.0` : JSON.stringify(value))
+          : JSON.stringify(value);
+    const checksum = crypto.createHash("sha256")
+      .update(stable(items))
+      .digest("hex");
+    const fragments = [
+      {command: "aircraft_mission_begin", command_id: commandId,
+        payload: {mission_id: missionId, item_count: items.length, vehicle: "aircraft", checksum}},
+      ...items.map((item) => ({command: "aircraft_mission_item", command_id: commandId, payload: item})),
+      {command: "aircraft_mission_commit", command_id: commandId,
+        payload: {mission_id: missionId, item_count: items.length, checksum}},
+    ];
+    const results = [];
+    for (const fragment of fragments) {
+      results.push(await sendCommand(fragment));
+      await new Promise((resolve) => setTimeout(resolve, 450));
+    }
+    return {success: true, fragmented: true, count: fragments.length, results};
+  }
   const properties = filterCommandProperties(command);
   if (!Object.keys(properties).length) {
     throw new Error("没有可下发的涂鸦属性");
   }
-  if (isAircraftCommand(properties) && lastState && !aircraftCommandsAllowed(lastState)) {
-    throw new Error("OPTICAL LINK BLOCKED");
+  if (isAircraftCommand(properties)) {
+    const gateState = FAKE_TUYA ? lastState : await fetchState();
+    if (!gateState || !aircraftCommandsAllowed(gateState)) {
+      throw new Error("OPTICAL LINK BLOCKED");
+    }
   }
   if (FAKE_TUYA) {
     fakeRevision += 1;
@@ -326,6 +402,7 @@ module.exports = {
   createServer,
   fetchState,
   normalizeStatus,
+  preserveAircraftDetails,
   sendCommand,
   signHeaders,
   startServer,

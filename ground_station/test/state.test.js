@@ -8,6 +8,7 @@ const path = require("node:path");
 const {
   appendAircraftMessages,
   aircraftCommandsAllowed,
+  aircraftHeartbeatSummary,
   normalizeCloudState,
   transactionTimeline,
 } = require("../public/core.js");
@@ -29,6 +30,7 @@ test("normalizes rover_state while preserving filtered raw properties", () => {
         lng: 118.95,
         flight_mode: "AUTO",
         optical_state: "locked",
+        updated_at: 1709999998,
       }),
     },
     {code: "command", value: "auto"},
@@ -38,6 +40,28 @@ test("normalizes rover_state while preserving filtered raw properties", () => {
   assert.equal(state.raw.command, "auto");
   assert.equal(state.cloud_received_at, 1710000000);
   assert.equal(state.optical.blocked, false);
+  assert.equal(state.state_fresh, true);
+  assert.equal(state.state_age_sec, 2);
+});
+
+test("stale rover and aircraft state cannot be presented as live or commandable", () => {
+  const state = normalizeCloudState([{
+    code: "rover_state",
+    value: JSON.stringify({
+      updated_at: 100,
+      armed: true,
+      optical_state: "locked",
+      aircraft: {
+        link_active: true,
+        last_seen_age_sec: 1,
+        messages: [],
+      },
+    }),
+  }], 200000);
+
+  assert.equal(state.state_fresh, false);
+  assert.equal(state.aircraft.link_active, false);
+  assert.equal(aircraftCommandsAllowed(state), false);
 });
 test("blocked optical state clears aircraft detail and rejects every aircraft command", () => {
   const state = normalizeCloudState([
@@ -98,6 +122,42 @@ test("repeated aircraft messages remain separate and keep source or cloud receiv
   assert.deepEqual(
     noSourceTime.map((item) => [item.time, item.text]),
     [[100, "GUIDED"], [101, "GUIDED"], [1001, "verified"]],
+  );
+});
+
+test("aircraft heartbeat summary keeps only mode and complete armed state", () => {
+  assert.deepEqual(
+    aircraftHeartbeatSummary({
+      time: 1710000000,
+      type: "AIRCRAFT",
+      text: "HEARTBEAT 心跳 GUIDED armed=YES sys=1/1",
+    }),
+    {
+      time: 1710000000,
+      type: "HEARTBEAT",
+      text: "GUIDED armed=YES",
+    },
+  );
+  assert.equal(
+    aircraftHeartbeatSummary({
+      type: "STATUSTEXT",
+      text: "PreArm: GPS 1: Bad fix",
+    }),
+    null,
+  );
+  assert.equal(
+    aircraftHeartbeatSummary({
+      type: "HEARTBEAT",
+      text: "GUIDED arme",
+    }, false).text,
+    "GUIDED armed=NO",
+  );
+  assert.equal(
+    aircraftHeartbeatSummary({
+      type: "HEARTBEAT",
+      text: "GUIDED arme",
+    }).text,
+    "GUIDED",
   );
 });
 

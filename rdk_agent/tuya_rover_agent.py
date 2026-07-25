@@ -2,6 +2,7 @@
 import argparse
 import json
 import os
+import re
 import ssl
 import time
 from pathlib import Path
@@ -126,42 +127,115 @@ def read_aircraft_summary(path: Path = AIRCRAFT_STATE_PATH, transport_status=Non
             "time": round(float(item.get("time", 0) or 0), 2),
             "type": str(item.get("type", "MSG"))[:24],
             "text": str(item.get("text", ""))[:160],
+            **{
+                key: item[key]
+                for key in (
+                    "battery_percent", "lat", "lng", "altitude",
+                    "ground_speed", "heading", "seq",
+                )
+                if key in item
+            },
         }
-        for item in messages[-6:]
+        for item in messages[-24:]
         if isinstance(item, dict)
     ]
     updated_at = float(doc.get("updated_at", 0) or 0)
     age = time.time() - updated_at if updated_at else None
-    transport_status = transport_status or {}
-    transport_locked = (
-        str(transport_status.get("optical_state", "")).lower() == "locked"
+    heartbeat = next(
+        (
+            item for item in reversed(compact_messages)
+            if str(item.get("type", "")).upper() == "HEARTBEAT"
+        ),
+        doc.get("latest_heartbeat")
+        if isinstance(doc.get("latest_heartbeat"), dict)
+        else None,
     )
-    link_active = bool(transport_locked or (age is not None and age < 3))
+    heartbeat_time = float(heartbeat.get("time", 0) or 0) if heartbeat else 0.0
+    heartbeat_age = time.time() - heartbeat_time if heartbeat_time else None
+    # The serial Wi-Fi module can deliver many position/raw packets between
+    # heartbeats. Packet freshness proves the uplink is alive; the retained
+    # heartbeat supplies stable mode/armed state without flickering.
+    link_active = bool(age is not None and age < 3 and heartbeat is not None)
     last_message = ""
     last_message_time = None
-    if compact_messages:
-        item = compact_messages[-1]
-        last_message = f"{item.get('type', 'MSG')} {item.get('text', '')}"[:160]
+    aircraft_mode = "UNKNOWN"
+    aircraft_armed = None
+    latest_by_type = {
+        kind: next(
+            (
+                item for item in reversed(compact_messages)
+                if str(item.get("type", "")).upper() == kind
+            ),
+            {},
+        )
+        for kind in ("SYS_STATUS", "GLOBAL_POSITION_INT", "VFR_HUD", "MISSION_CURRENT")
+    }
+    if heartbeat:
+        item = heartbeat
+        item_type = str(item.get("type", "MSG")).upper()
+        item_text = str(item.get("text", ""))
+        if item_type == "HEARTBEAT":
+            mode_match = re.search(
+                r"(?:心跳|HEARTBEAT)\s+([A-Z_]+)",
+                item_text,
+                re.IGNORECASE,
+            )
+            armed_match = re.search(
+                r"armed\s*=\s*(YES|NO|TRUE|FALSE|0|1)",
+                item_text,
+                re.IGNORECASE,
+            )
+            mode = mode_match.group(1).upper() if mode_match else "UNKNOWN"
+            armed = armed_match.group(1).upper() if armed_match else "UNKNOWN"
+            if armed in ("TRUE", "1"):
+                armed = "YES"
+            elif armed in ("FALSE", "0"):
+                armed = "NO"
+            aircraft_mode = mode
+            aircraft_armed = armed == "YES" if armed in ("YES", "NO") else None
+            last_message = f"HEARTBEAT {mode} armed={armed}"
         last_message_time = item.get("time")
-    if transport_locked and not compact_messages:
-        last_message = "STATUS aircraft link authenticated"
-        last_message_time = time.time()
+    system_status = latest_by_type["SYS_STATUS"]
+    position = latest_by_type["GLOBAL_POSITION_INT"]
+    hud = latest_by_type["VFR_HUD"]
+    mission = latest_by_type["MISSION_CURRENT"]
+    aircraft_details = {
+        "battery_percent": system_status.get("battery_percent"),
+        "lat": position.get("lat"),
+        "lng": position.get("lng"),
+        "altitude": position.get("altitude"),
+        "ground_speed": hud.get("ground_speed", position.get("ground_speed")),
+        "heading": hud.get("heading", position.get("heading")),
+        "mission_status": (
+            f"seq={mission['seq']}" if "seq" in mission else None
+        ),
+    }
     return {
         "aircraft": {
             "link_active": link_active,
-            "last_seen_age_sec": round(age, 2) if age is not None else None,
+            "last_seen_age_sec": (
+                round(heartbeat_age, 2) if heartbeat_age is not None else None
+            ),
             "last_remote": str(doc.get("last_remote", ""))[:64],
             "packets_received": int(doc.get("packets_received", 0) or 0),
             "bytes_received": int(doc.get("bytes_received", 0) or 0),
             "messages": compact_messages,
-            "optical_state": "locked" if transport_locked else "blocked",
+            "optical_state": "locked" if link_active else "blocked",
+            **aircraft_details,
         },
         "aircraft_link": link_active,
         "aircraft_age": round(age, 1) if age is not None else None,
         "aircraft_packets": int(doc.get("packets_received", 0) or 0),
         "aircraft_msg": last_message,
         "aircraft_msg_time": last_message_time,
-        "aircraft_optical_state": "locked" if transport_locked else "blocked",
+        "aircraft_mode": aircraft_mode,
+        "aircraft_armed": aircraft_armed,
+        **{
+            f"aircraft_{key}": value
+            for key, value in aircraft_details.items()
+            if value is not None
+        },
+        "aircraft_optical_state": "locked" if link_active else "blocked",
     }
 
 
@@ -186,6 +260,14 @@ def read_optical_state(path: Path = AIRCRAFT_STATE_PATH) -> str:
             return "blocked"
     updated_at = float(doc.get("updated_at", 0) or 0)
     return "locked" if updated_at and time.time() - updated_at < 3 else "blocked"
+
+
+def aircraft_report_signature(summary: dict) -> tuple:
+    return (
+        bool(summary.get("aircraft_link")),
+        str(summary.get("aircraft_mode", "UNKNOWN")),
+        summary.get("aircraft_armed"),
+    )
 
 
 def start_aircraft_state_gateway(config: dict, transport_port: int = 14560):
@@ -223,11 +305,30 @@ def run_agent(config: dict) -> int:
             str(config.get("aircraft_peer_host", "192.168.4.1")),
             int(config.get("aircraft_peer_port", 14555)),
         ),
+        command_peer=(
+            str(config.get("aircraft_peer_host", "192.168.4.1")),
+            int(config.get("aircraft_command_peer_port", 14560)),
+        ),
         psk=config.get("aircraft_link_psk") or os.environ.get(
             "AIRCRAFT_LINK_PSK"
         ),
         auth_store=AtomicJsonStore(config["aircraft_auth_state_path"]),
+        packet_observer=lambda data, remote: aircraft_gateway.record_packet(
+            aircraft_local_port,
+            data,
+            remote,
+        ),
     )
+
+    def aircraft_optical_state():
+        if aircraft_transport.optical_state() == "locked":
+            return "locked"
+        try:
+            if aircraft_gateway.snapshot().get("link_active"):
+                return "locked"
+        except Exception:
+            pass
+        return "blocked"
 
     class RoverExecutor:
         def execute(self, command):
@@ -261,8 +362,8 @@ def run_agent(config: dict) -> int:
 
     router = CommandRouter(
         RoverExecutor(),
-        aircraft_link,
-        optical_state=aircraft_transport.optical_state,
+        aircraft_transport,
+        optical_state=aircraft_optical_state,
         system_executor=NetworkModeExecutor(config["network_mode_request_path"]),
         max_age_seconds=float(config.get("command_max_age_sec", 10.0)),
     )
@@ -295,6 +396,7 @@ def run_agent(config: dict) -> int:
     client.loop_start()
 
     next_report = 0.0
+    last_aircraft_report_signature = None
     last_aircraft_diagnostic = None
     report_interval = float(config["report_interval_sec"])
     next_lte = 0.0
@@ -374,14 +476,21 @@ def run_agent(config: dict) -> int:
                 telemetry.lte_rssi = read_lte_rssi(config["at_port"])
                 next_lte = now + 10
             write_state(state_path, telemetry, connected)
-            if now >= next_report:
+            aircraft_summary = read_aircraft_summary(
+                transport_status=aircraft_transport.status()
+            )
+            aircraft_signature = aircraft_report_signature(aircraft_summary)
+            aircraft_changed = (
+                last_aircraft_report_signature is not None
+                and aircraft_signature != last_aircraft_report_signature
+            )
+            if now >= next_report or aircraft_changed:
                 payload = telemetry.tuya_compact_payload(
-                    read_aircraft_summary(
-                        transport_status=aircraft_transport.status()
-                    )
+                    aircraft_summary
                 )
                 info = client.publish(report_topic, json.dumps(payload, separators=(",", ":")), qos=1)
                 next_report = now + report_interval
+                last_aircraft_report_signature = aircraft_signature
                 print(f"published {report_topic} rc={info.rc} msgId={payload['msgId']}", flush=True)
         except Exception as exc:
             telemetry.fault_text = f"agent loop error: {exc}"

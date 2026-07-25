@@ -82,6 +82,17 @@
           link_active: Boolean(telemetry.aircraft_link),
           last_seen_age_sec: telemetry.aircraft_age,
           packets_received: telemetry.aircraft_packets,
+          mode: telemetry.aircraft_mode,
+          armed: typeof telemetry.aircraft_armed === "boolean"
+            ? telemetry.aircraft_armed
+            : undefined,
+          battery_percent: telemetry.aircraft_battery_percent,
+          lat: telemetry.aircraft_lat,
+          lng: telemetry.aircraft_lng,
+          altitude: telemetry.aircraft_altitude,
+          ground_speed: telemetry.aircraft_ground_speed,
+          heading: telemetry.aircraft_heading,
+          mission_status: telemetry.aircraft_mission_status,
           messages: telemetry.aircraft_msg
             ? [{
                 time: Number(telemetry.aircraft_msg_time) || receivedAt,
@@ -105,11 +116,45 @@
     const raw = propertyMap(result);
     const telemetry = parseRoverState(raw.rover_state);
     const cloudReceivedAt = Number(receivedAtMs) / 1000;
+    const telemetryUpdatedAt = Number(telemetry.updated_at || 0);
+    const stateAgeSec = telemetryUpdatedAt > 0
+      ? Math.max(0, cloudReceivedAt - telemetryUpdatedAt)
+      : null;
+    const stateFresh = stateAgeSec !== null && stateAgeSec <= 8;
     const aircraft = normalizeAircraft(telemetry, cloudReceivedAt);
+    const aircraftAge = Number(aircraft.last_seen_age_sec);
+    const aircraftFresh = stateFresh
+      && Boolean(aircraft.link_active)
+      && Number.isFinite(aircraftAge)
+      && aircraftAge <= 8;
+    if (!aircraft.blocked) {
+      const structuredLink = Boolean(
+        telemetry.aircraft_link || aircraft.link_active,
+      );
+      const hasStructuredHeartbeat = Boolean(
+        telemetry.aircraft_mode
+        && typeof telemetry.aircraft_armed === "boolean",
+      );
+      aircraft.link_active = stateFresh
+        && (aircraftFresh || (structuredLink && hasStructuredHeartbeat));
+      if (hasStructuredHeartbeat && !aircraft.messages.length) {
+        aircraft.messages = [{
+          time: Number(telemetry.aircraft_msg_time) || cloudReceivedAt,
+          type: "HEARTBEAT",
+          text: `${String(telemetry.aircraft_mode).toUpperCase()} armed=${
+            telemetry.aircraft_armed ? "YES" : "NO"
+          }`,
+          key: `structured-heartbeat-${telemetry.aircraft_msg_time || cloudReceivedAt}`,
+        }];
+      }
+      if (!aircraft.link_active) aircraft.status = "WAITING";
+    }
     return {
       online: true,
       updated_at: cloudReceivedAt,
       cloud_received_at: cloudReceivedAt,
+      state_fresh: stateFresh,
+      state_age_sec: stateAgeSec,
       telemetry,
       raw,
       optical: {
@@ -130,6 +175,32 @@
       type,
       text,
       key: String(item?.key || `${time}\n${sequence}\n${type}\n${text}`),
+    };
+  }
+
+  function aircraftHeartbeatSummary(item, fallbackArmed) {
+    const source = `${item?.type || ""} ${item?.text || ""}`;
+    if (!/HEARTBEAT|心跳/i.test(source)) return null;
+    const mode = source.match(
+      /(?:HEARTBEAT|心跳)(?:\s+心跳)?\s+([A-Z][A-Z0-9_]*)/i,
+    )?.[1]?.toUpperCase() || "UNKNOWN";
+    const rawArmed = source.match(
+      /\barmed\s*=\s*(YES|NO|TRUE|FALSE|0|1)\b/i,
+    )?.[1]?.toUpperCase();
+    const parsedArmed = rawArmed === "TRUE" || rawArmed === "1"
+      ? "YES"
+      : rawArmed === "FALSE" || rawArmed === "0"
+        ? "NO"
+        : rawArmed;
+    const armed = parsedArmed || (
+      typeof fallbackArmed === "boolean"
+        ? (fallbackArmed ? "YES" : "NO")
+        : ""
+    );
+    return {
+      time: Number(item?.time) || Number(item?.received_at) || 0,
+      type: "HEARTBEAT",
+      text: armed ? `${mode} armed=${armed}` : mode,
     };
   }
 
@@ -260,7 +331,16 @@
   }
 
   function aircraftCommandsAllowed(state) {
-    return Boolean(state?.online && !state?.optical?.blocked);
+    const linkActive = Boolean(
+      state?.aircraft?.link_active
+      || state?.telemetry?.aircraft_link,
+    );
+    return Boolean(
+      state?.online
+      && state?.state_fresh
+      && linkActive
+      && !state?.optical?.blocked,
+    );
   }
 
   function transactionTimeline(telemetry, vehicle) {
@@ -328,6 +408,7 @@
     MAX_MISSION_ITEMS,
     appendAircraftMessages,
     aircraftCommandsAllowed,
+    aircraftHeartbeatSummary,
     buildMissionCommand,
     filterCommandProperties,
     isAircraftCommand,

@@ -4,6 +4,10 @@ import socket
 import time
 import uuid
 
+try:
+    from .aircraft_commands import build_aircraft_command_packets
+except ImportError:
+    from aircraft_commands import build_aircraft_command_packets
 from shared_protocol.auth import (
     AuthError,
     AuthenticatedDatagramCodec,
@@ -37,6 +41,7 @@ class AircraftTransport:
         local_host="0.0.0.0",
         local_port=14560,
         peer=("192.168.4.1", 14555),
+        command_peer=None,
         psk=None,
         socket_factory=socket.socket,
         clock=time.monotonic,
@@ -44,6 +49,7 @@ class AircraftTransport:
         retry_backoff=0.25,
         max_retry_backoff=4.0,
         auth_store=None,
+        packet_observer=None,
     ):
         if peer is None:
             raise ValueError("an exact aircraft peer is required")
@@ -55,6 +61,17 @@ class AircraftTransport:
             raise ValueError("invalid retry backoff")
         self.aircraft_link = aircraft_link
         self._peer = (str(peer[0]), int(peer[1]))
+        self._command_peer = (
+            (str(command_peer[0]), int(command_peer[1]))
+            if command_peer is not None
+            else self._peer
+        )
+        if self._command_peer[0] != self._peer[0]:
+            raise ValueError("command peer host must match aircraft peer host")
+        # The telemetry module emits toward the RDK's 14560 listener, while
+        # its proven aircraft-side command ingress is the peer's 14555 port.
+        # Use one destination so authenticated counters cannot be replayed.
+        self._command_peers = (self._peer,)
         self._auth = (
             PersistentAuthSession(psk, auth_store)
             if auth_store is not None
@@ -83,7 +100,10 @@ class AircraftTransport:
         self._rx_auth_errors = 0
         self._rx_frame_errors = 0
         self._last_remote = ""
+        self._next_bootstrap_at = 0.0
+        self._bootstrap_sequence = 0
         self._decoder = AuthenticatedStreamDecoder()
+        self._packet_observer = packet_observer
         self._socket = self._create_socket()
 
     @property
@@ -112,6 +132,7 @@ class AircraftTransport:
             "peer": (
                 f"{self._peer[0]}:{self._peer[1]}" if self._peer else ""
             ),
+            "command_peer": f"{self._command_peer[0]}:{self._command_peer[1]}",
             "transport_error": self._transport_error,
             "rx_packets": self._rx_packets,
             "rx_wrong_peer": self._rx_wrong_peer,
@@ -140,6 +161,29 @@ class AircraftTransport:
             state["remote_detail"] = self._remote_detail
         return state
 
+    def execute(self, command):
+        action = str(command.action).strip().lower()
+        if action not in {
+            "mission", "mission_begin", "mission_item", "mission_commit"
+        }:
+            packets = build_aircraft_command_packets(
+                f"aircraft_{action}",
+                target_lat=command.payload.get("target_lat"),
+                target_lng=command.payload.get("target_lng"),
+                target_alt=command.payload.get(
+                    "target_alt", command.payload.get("target_speed")
+                ),
+            )
+            for packet in packets:
+                for peer in dict.fromkeys((self._command_peer, self._peer)):
+                    self._socket.sendto(packet, peer)
+            return {
+                "accepted": True,
+                "stage": "sent_mavlink2",
+                "message": f"aircraft_{action} sent",
+            }
+        return self.aircraft_link.execute(command, now=self._clock())
+
     def pump(self, now, max_receive=32):
         now = float(now)
         if not self._ensure_socket(now):
@@ -149,16 +193,34 @@ class AircraftTransport:
         if self._socket is None:
             return self.transaction_state()
         if self._optical_state != "locked":
+            self._send_bootstrap(now)
             self.aircraft_link.fail_transaction(
                 "link_blocked", self._link_detail or "optical link blocked"
             )
             return self.transaction_state()
         try:
             for payload in self.aircraft_link.due_bytes(now):
-                self._socket.sendto(self._seal(payload), self._peer)
+                self._send_command_payload(payload)
         except OSError as exc:
             self._schedule_reopen(now, f"udp send failed: {exc}")
         return self.transaction_state()
+
+    def _send_bootstrap(self, now):
+        if now < self._next_bootstrap_at:
+            return
+        probe = Frame(
+            MessageType.AUTH_CHALLENGE,
+            0,
+            self._bootstrap_sequence,
+            uuid.UUID(int=0),
+            {"challenge": "00" * 32},
+        )
+        self._bootstrap_sequence = (self._bootstrap_sequence + 1) & 0xFFFFFFFF
+        self._next_bootstrap_at = now + 1.0
+        try:
+            self._send_command_payload(encode_frame(probe))
+        except OSError as exc:
+            self._schedule_reopen(now, f"bootstrap send failed: {exc}")
 
     def _receive(self, max_receive, now):
         for _ in range(max_receive):
@@ -171,9 +233,23 @@ class AircraftTransport:
                 return
             self._rx_packets += 1
             self._last_remote = f"{remote[0]}:{remote[1]}"
-            if (str(remote[0]), int(remote[1])) != self._peer:
+            if (
+                str(remote[0]) != self._peer[0]
+                or int(remote[1]) not in {self._peer[1], self._command_peer[1]}
+            ):
                 self._rx_wrong_peer += 1
                 continue
+            if self._packet_observer is not None:
+                try:
+                    if self._packet_observer(data, remote):
+                        self._optical_state = "locked"
+                        self._link_detail = "mavlink_telemetry"
+                        self._last_locked_at = now
+                        continue
+                except Exception as exc:
+                    self._transport_error = (
+                        f"packet observer failed: {exc}"
+                    )[:120]
             for envelope in self._decoder.feed(data):
                 self._process_envelope(envelope, now)
 
@@ -200,9 +276,7 @@ class AircraftTransport:
                 {"challenge": frame.payload["challenge"]},
             )
             try:
-                self._socket.sendto(
-                    self._seal(encode_frame(response)), self._peer
-                )
+                self._send_command_payload(encode_frame(response))
             except OSError as exc:
                 self._schedule_reopen(
                     now, f"challenge response failed: {exc}"
@@ -245,6 +319,13 @@ class AircraftTransport:
 
     def _seal(self, payload):
         return self._auth.seal(payload)
+
+    def _send_command_payload(self, payload):
+        for peer in self._command_peers:
+            # Each UDP destination gets a distinct authenticated counter. Some
+            # serial telemetry modules mirror both configured ports, so sharing
+            # one envelope would trigger replay rejection at the aircraft.
+            self._socket.sendto(self._seal(payload), peer)
 
     def _open(self, datagram):
         opened = self._auth.open(datagram)

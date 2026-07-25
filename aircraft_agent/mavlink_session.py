@@ -65,6 +65,7 @@ class MavlinkSession:
         self._stop_reader = threading.Event()
         self._reader_ids = set()
         self._subscribers = []
+        self._write_lock = threading.Lock()
 
     @classmethod
     def open(cls, path="/dev/ttyACM0", baud=115200, **kwargs):
@@ -182,6 +183,7 @@ class MavlinkSession:
                 int(fields["seq"]),
                 mission_type,
             )
+
         elif kind == "MISSION_ACK":
             self._compat(
                 mav.mission_ack_send,
@@ -199,6 +201,30 @@ class MavlinkSession:
             self.connection.arducopter_arm() if fields["value"] else self.connection.arducopter_disarm()
         else:
             raise ValueError(f"unsupported MAVLink operation {kind}")
+
+    def write_raw(self, frame):
+        data = bytes(frame)
+        if not data:
+            return 0
+        with self._write_lock:
+            return self.connection.write(data)
+
+    def request_message_interval(self, message_id, interval_us):
+        """Request a runtime telemetry rate without changing FC parameters."""
+        with self._write_lock:
+            return self.connection.mav.command_long_send(
+                self.target_system,
+                self.target_component,
+                511,  # MAV_CMD_SET_MESSAGE_INTERVAL
+                0,
+                float(message_id),
+                float(interval_us),
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+            )
 
     @staticmethod
     def _compat(function, *args):

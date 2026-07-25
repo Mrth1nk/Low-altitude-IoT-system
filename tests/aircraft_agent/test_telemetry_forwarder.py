@@ -1,0 +1,52 @@
+import unittest
+
+from aircraft_agent.main import MavlinkTelemetryForwarder
+
+
+class FakeMessage:
+    def __init__(self, kind, frame):
+        self.kind = kind
+        self.frame = frame
+
+    def get_type(self):
+        return self.kind
+
+    def get_msgbuf(self):
+        return self.frame
+
+
+class FakeStream:
+    def __init__(self):
+        self.frames = []
+
+    def write(self, frame):
+        self.frames.append(bytes(frame))
+        return len(frame)
+
+
+class MavlinkTelemetryForwarderTests(unittest.TestCase):
+    def test_forwards_allowed_mavlink_frame_only_when_optical_path_is_locked(self):
+        forwarder = MavlinkTelemetryForwarder()
+        stream = FakeStream()
+        frame = b"\xfd\x00\x00\x00\x00\x01\x01\x00\x00\x00\x00\x00"
+
+        forwarder.observe(FakeMessage("HEARTBEAT", frame))
+        forwarder.drain_to(stream, allowed=False)
+        self.assertEqual(stream.frames, [])
+
+        forwarder.observe(FakeMessage("HEARTBEAT", frame))
+        forwarder.drain_to(stream, allowed=True)
+        self.assertEqual(stream.frames, [frame])
+        self.assertEqual(forwarder.snapshot()["written"], 1)
+
+    def test_drops_non_mavlink_and_unlisted_messages(self):
+        forwarder = MavlinkTelemetryForwarder()
+        stream = FakeStream()
+        forwarder.observe(FakeMessage("HEARTBEAT", b"not-mavlink"))
+        forwarder.observe(FakeMessage("ATTITUDE", b"\xfd\x00"))
+        forwarder.drain_to(stream, allowed=True)
+        self.assertEqual(stream.frames, [])
+
+
+if __name__ == "__main__":
+    unittest.main()

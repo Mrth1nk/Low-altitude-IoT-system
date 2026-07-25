@@ -26,6 +26,25 @@ def test_gateway_snapshot_marks_link_active_after_packet():
     assert snapshot["messages"][-1]["type"] == "RAW"
 
 
+def test_latest_heartbeat_survives_newer_non_heartbeat_packets():
+    state = AircraftGatewayState(max_messages=4)
+    payload = bytes([4, 0, 0, 0, 0, 0, 0, 0, 0])
+    heartbeat = bytes([0xFD, len(payload), 0, 0, 0, 1, 1, 0, 0, 0])
+    state.record_packet(
+        14560,
+        heartbeat + payload + b"\x00\x00",
+        ("192.168.4.1", 14555),
+    )
+
+    for _ in range(10):
+        state.record_packet(14560, b"raw", ("192.168.4.1", 14555))
+
+    snapshot = state.snapshot()
+    assert not any(item["type"] == "HEARTBEAT" for item in snapshot["messages"])
+    assert snapshot["latest_heartbeat"]["type"] == "HEARTBEAT"
+    assert "GUIDED" in snapshot["latest_heartbeat"]["text"]
+
+
 def test_parse_mission_request_and_ack_for_upload_handshake():
     request = parse_payload(51, 1, 1, bytes([1, 0, 255, 190, 0]))
     ack = parse_payload(47, 1, 1, bytes([255, 190, 0, 0]))

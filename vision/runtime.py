@@ -7,6 +7,7 @@ from pathlib import Path
 import signal
 import threading
 import time
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from aircraft_agent.state_store import AtomicJsonStore
 from .config import CameraConfig, DetectorConfig, OpticalConfig, TrackerConfig
@@ -15,6 +16,55 @@ from .guided_tracker import GuidedTracker
 from .mode_controller import VisionModeController
 from .optical_state import OpticalStateMachine
 from .precision_landing import send_landing_target
+
+
+class PreviewServer:
+    def __init__(self, host, port):
+        self.latest = None
+        latest = self
+
+        class Handler(BaseHTTPRequestHandler):
+            def log_message(self, *_args):
+                return
+
+            def do_GET(self):
+                if self.path not in ("/", "/stream"):
+                    self.send_error(404)
+                    return
+                if self.path == "/":
+                    body = b'<html><body style="margin:0;background:#111"><img src="/stream" style="max-width:100vw"></body></html>'
+                    self.send_response(200)
+                    self.send_header("Content-Type", "text/html; charset=utf-8")
+                    self.send_header("Content-Length", str(len(body)))
+                    self.end_headers()
+                    self.wfile.write(body)
+                    return
+                self.send_response(200)
+                self.send_header("Content-Type", "multipart/x-mixed-replace; boundary=frame")
+                self.send_header("Cache-Control", "no-cache")
+                self.end_headers()
+                try:
+                    while True:
+                        jpeg = latest.latest
+                        if jpeg:
+                            self.wfile.write(b"--frame\r\nContent-Type: image/jpeg\r\n")
+                            self.wfile.write(f"Content-Length: {len(jpeg)}\r\n\r\n".encode())
+                            self.wfile.write(jpeg + b"\r\n")
+                            self.wfile.flush()
+                        time.sleep(0.08)
+                except (BrokenPipeError, ConnectionResetError):
+                    pass
+
+        self.server = ThreadingHTTPServer((host, int(port)), Handler)
+        self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
+        self.thread.start()
+
+    def update(self, jpeg):
+        self.latest = jpeg
+
+    def close(self):
+        self.server.shutdown()
+        self.server.server_close()
 
 
 class OpticalStatePublisher:
@@ -83,6 +133,10 @@ def run():
     camera = cv2.VideoCapture(camera_device)
     if not camera.isOpened():
         raise RuntimeError(f"camera unavailable: {camera_device}")
+    preview = PreviewServer(
+        os.environ.get("VISION_STREAM_HOST", "0.0.0.0"),
+        int(os.environ.get("VISION_STREAM_PORT", "8090")),
+    )
 
     detector_config = DetectorConfig(
         threshold=int(os.environ.get("IR_THRESHOLD", "235")),
@@ -170,6 +224,26 @@ def run():
                 _send_guided_velocity(master, output.correction)
             if output.landing_target is not None:
                 send_landing_target(master.mav, output.landing_target)
+
+            preview_frame = frame.copy()
+            optical = output.optical
+            label = (
+                f"{mode}  "
+                f"{'LOCKED' if optical.locked else 'BLOCKED'}  "
+                f"conf={optical.confidence:.2f} area={optical.area:.0f}"
+            )
+            cv2.rectangle(preview_frame, (8, 8), (min(780, 16 + len(label) * 12), 42), (0, 0, 0), -1)
+            cv2.putText(
+                preview_frame, label, (16, 31),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.62,
+                (0, 255, 0) if optical.locked else (0, 140, 255), 2,
+                cv2.LINE_AA,
+            )
+            ok_jpeg, jpeg = cv2.imencode(
+                ".jpg", preview_frame, [cv2.IMWRITE_JPEG_QUALITY, 70]
+            )
+            if ok_jpeg:
+                preview.update(jpeg.tobytes())
             publisher.publish(
                 locked=output.optical.locked,
                 confidence=output.optical.confidence,
@@ -188,6 +262,7 @@ def run():
             last_error="vision_stopped",
         )
         camera.release()
+        preview.close()
         master.close()
 
 

@@ -347,6 +347,7 @@ class RoverMissionManager:
         param_tolerance: float = 1e-4,
         clock=None,
         navigation_freshness: float = 3.0,
+        clear_before_upload: bool = True,
     ):
         if retries < 0:
             raise ValueError("retries must be non-negative")
@@ -368,6 +369,7 @@ class RoverMissionManager:
         self.param_tolerance = float(param_tolerance)
         self.clock = clock or time.monotonic
         self.navigation_freshness = float(navigation_freshness)
+        self.clear_before_upload = bool(clear_before_upload)
         self._operation_deadline = float("inf")
         self._sequence_requests = {}
         self.status = MissionStatus()
@@ -406,7 +408,8 @@ class RoverMissionManager:
         self._operation_deadline = self.clock() + self.operation_timeout
         self._sequence_requests = {}
         try:
-            self._clear()
+            if self.clear_before_upload:
+                self._clear()
             self.status.residual_unsafe = False
             self._upload(upload_items)
             if progress is not None:

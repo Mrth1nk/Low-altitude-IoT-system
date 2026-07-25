@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
+import queue
 import signal
 import threading
 import time
@@ -200,6 +201,66 @@ class HeartbeatMonitor:
             return self.timestamp
 
 
+class MavlinkTelemetryForwarder:
+    """Queues raw FC MAVLink frames for the WiFi MAVLink bridge."""
+
+    ALLOWED_TYPES = {
+        "HEARTBEAT",
+        "SYS_STATUS",
+        "GPS_RAW_INT",
+        "GLOBAL_POSITION_INT",
+        "VFR_HUD",
+        "STATUSTEXT",
+        "MISSION_CURRENT",
+        "MISSION_ITEM_REACHED",
+        "MISSION_REQUEST",
+        "MISSION_REQUEST_INT",
+        "MISSION_ACK",
+        "COMMAND_ACK",
+    }
+
+    def __init__(self, *, max_frames=256):
+        self.frames = queue.Queue(maxsize=int(max_frames))
+        self.dropped = 0
+        self.written = 0
+        self.bytes_written = 0
+
+    def observe(self, message):
+        if message_type(message) not in self.ALLOWED_TYPES:
+            return
+        getter = getattr(message, "get_msgbuf", None)
+        frame = bytes(getter() or b"") if callable(getter) else b""
+        if not frame or frame[0] not in (0xFD, 0xFE):
+            return
+        try:
+            self.frames.put_nowait(frame)
+        except queue.Full:
+            self.dropped += 1
+
+    def drain_to(self, stream, *, allowed, limit=32):
+        sent = 0
+        while sent < int(limit):
+            try:
+                frame = self.frames.get_nowait()
+            except queue.Empty:
+                break
+            if not allowed:
+                continue
+            stream.write(frame)
+            self.written += 1
+            self.bytes_written += len(frame)
+            sent += 1
+        return sent
+
+    def snapshot(self):
+        return {
+            "queued": self.frames.qsize(),
+            "written": self.written,
+            "bytes_written": self.bytes_written,
+            "dropped": self.dropped,
+        }
+
+
 def _apply_gate(gate, state):
     if state.get("locked") is True and state.get("blocked") is False:
         if not gate.locked:
@@ -233,8 +294,18 @@ def run():
         telemetry=telemetry,
     )
     heartbeat = HeartbeatMonitor()
+    telemetry_forwarder = MavlinkTelemetryForwarder()
     session.subscribe(heartbeat.observe)
+    session.subscribe(telemetry_forwarder.observe)
     session.start_reader()
+    for message_id, interval_us in (
+        (1, 500_000),   # SYS_STATUS: 2 Hz
+        (147, 1_000_000),  # BATTERY_STATUS: 1 Hz
+        (33, 500_000),  # GLOBAL_POSITION_INT: 2 Hz
+        (74, 500_000),  # VFR_HUD: 2 Hz
+        (42, 1_000_000),  # MISSION_CURRENT: 1 Hz
+    ):
+        session.request_message_interval(message_id, interval_us)
 
     optical_reader = OpticalStateReader(
         optical_path,
@@ -260,6 +331,7 @@ def run():
         psk=psk,
         auth_store=AtomicJsonStore(state_dir / "auth.json"),
         stream=stream,
+        mavlink_sink=session.write_raw,
     )
     health = HealthSnapshotWriter(
         AtomicJsonStore(runtime_dir / "aircraft-health.json", max_bytes=64 * 1024)
@@ -279,6 +351,11 @@ def run():
         while not stop.is_set():
             optical = optical_reader.read()
             _apply_gate(gate, optical)
+            telemetry_forwarder.drain_to(
+                stream,
+                allowed=optical.get("locked") is True
+                and optical.get("blocked") is False,
+            )
             try:
                 server.pump_once(snapshot=telemetry.snapshot())
                 last_error = ""
@@ -297,6 +374,14 @@ def run():
                     optical=optical,
                     last_error=last_error,
                 )
+                health_doc = health.store.load({})
+                health_doc["wifi_mavlink"] = telemetry_forwarder.snapshot()
+                health_doc["wifi_downlink"] = {
+                    "chunks": server.metrics.get("mavlink_chunks", 0),
+                    "bytes": server.metrics.get("mavlink_bytes", 0),
+                }
+                health_doc["wifi_link"] = dict(server.metrics)
+                health.store.save(health_doc)
                 next_health = now + 0.5
     finally:
         worker.close()

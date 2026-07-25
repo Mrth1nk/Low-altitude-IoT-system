@@ -91,8 +91,11 @@ class RoverMavlink:
                 if hb is not None:
                     self.conn = conn
                     self.url = url
-                    self.target_system = conn.target_system or 1
-                    self.target_component = conn.target_component or 0
+                    self.target_system = hb.get_srcSystem() or conn.target_system or 1
+                    # pymavlink's conn.target_component is the local default
+                    # (often 0), not the component that emitted the heartbeat.
+                    # Rover mission services on this FC listen on component 1.
+                    self.target_component = hb.get_srcComponent() or 1
                     self.last_heartbeat = time.time()
                     self.home_valid = False
                     self.home_updated_monotonic = 0.0
@@ -100,6 +103,7 @@ class RoverMavlink:
                         RoverMavlinkTransport(self),
                         vehicle_system=self.target_system,
                         vehicle_component=self.target_component,
+                        clear_before_upload=False,
                     )
                     self.load_rc_params()
                     RoverMavlinkTransport(self).request_home_position()
@@ -225,11 +229,11 @@ class RoverMavlink:
                 self.stop()
                 return True, "stopped"
             if cmd == "arm":
-                self.safe_arm()
-                return True, "safe arm sent"
+                ok, detail = self.safe_arm()
+                return ok, detail
             if cmd == "disarm":
-                self.arm(False)
-                return True, "disarm sent"
+                ok, detail = self.arm(False)
+                return ok, detail
             if cmd in ("manual", "drive"):
                 self.manual(command.steering, command.throttle)
                 return True, "manual control sent"
@@ -252,7 +256,7 @@ class RoverMavlink:
         except Exception as exc:
             return False, str(exc)
 
-    def arm(self, arm: bool) -> None:
+    def arm(self, arm: bool) -> tuple[bool, str]:
         with self.session_lock:
             self.conn.mav.command_long_send(
                 self.target_system,
@@ -267,8 +271,25 @@ class RoverMavlink:
                 0,
                 0,
             )
+            ack = self.conn.recv_match(
+                type="COMMAND_ACK",
+                blocking=True,
+                timeout=1.5,
+            )
+            if ack is None:
+                return False, "arm command sent but no COMMAND_ACK from flight controller"
+            result = int(getattr(ack, "result", -1))
+            accepted = {
+                int(getattr(mavutil.mavlink, "MAV_RESULT_ACCEPTED", 0)),
+                int(getattr(mavutil.mavlink, "MAV_RESULT_IN_PROGRESS", 5)),
+            }
+            if result not in accepted:
+                name = mavutil.mavlink.enums.get("MAV_RESULT", {}).get(result)
+                label = getattr(name, "name", None) if name else None
+                return False, f"flight controller rejected {'arm' if arm else 'disarm'}: {label or result}"
+            return True, f"{'arm' if arm else 'disarm'} acknowledged by flight controller"
 
-    def safe_arm(self) -> None:
+    def safe_arm(self) -> tuple[bool, str]:
         # Rover may start moving immediately if armed while AUTO has an active mission.
         # Force a non-moving mode and neutral RC before and after arming.
         for mode in ("HOLD", "MANUAL"):
@@ -279,9 +300,10 @@ class RoverMavlink:
                 continue
         self.stop()
         time.sleep(0.15)
-        self.arm(True)
+        ok, detail = self.arm(True)
         time.sleep(0.2)
         self.stop()
+        return ok, detail
 
     def set_mode(self, mode: str) -> None:
         with self.session_lock:
@@ -435,6 +457,7 @@ class RoverMavlink:
                 RoverMavlinkTransport(self),
                 vehicle_system=self.target_system,
                 vehicle_component=self.target_component,
+                clear_before_upload=False,
             )
         items = [
             MissionItem.from_payload(item, seq=index)
@@ -478,6 +501,7 @@ class RoverMavlink:
                 transport,
                 vehicle_system=self.target_system,
                 vehicle_component=self.target_component,
+                clear_before_upload=False,
             )
             return self.mission_manager.upload_and_verify(
                 job.items,
@@ -502,7 +526,9 @@ class RoverMavlinkTransport:
         conn = self.rover.conn
         mav = conn.mav
         system = self.rover.target_system
-        component = self.rover.target_component
+        # Address the component that emitted the heartbeat.  For this Rover
+        # build that is component 1; component 0 is not a valid upload target.
+        component = self.rover.target_component or 1
         mission_type = getattr(
             getattr(mavutil, "mavlink", None),
             "MAV_MISSION_TYPE_MISSION",

@@ -109,14 +109,18 @@ function renderMessages() {
 }
 
 function aircraftDetails(aircraft) {
+  const heading = Number(aircraft.heading);
+  const normalizedHeading = Number.isFinite(heading)
+    ? (((Math.abs(heading) > 360 ? heading / 100 : heading) % 360) + 360) % 360
+    : null;
   return [
     ["模式", aircraft.mode || aircraft.flight_mode || "-"],
     ["解锁", aircraft.armed === true ? "YES" : aircraft.armed === false ? "NO" : "-"],
-    ["电量", aircraft.battery_percent != null ? `${aircraft.battery_percent}%` : "-"],
-    ["高度", aircraft.altitude != null ? `${aircraft.altitude} m` : "-"],
-    ["速度", aircraft.ground_speed != null ? `${aircraft.ground_speed} m/s` : "-"],
-    ["航向", aircraft.heading != null ? `${aircraft.heading}°` : "-"],
-    ["位置", validCoord(aircraft.lat, aircraft.lng) ? `${Number(aircraft.lat).toFixed(6)}, ${Number(aircraft.lng).toFixed(6)}` : "-"],
+    ["电量", `${aircraft.battery_percent ?? 100}%`],
+    ["高度", aircraft.altitude != null ? `${Number(aircraft.altitude).toFixed(2)} m` : "-"],
+    ["速度", aircraft.ground_speed != null ? `${Number(aircraft.ground_speed).toFixed(2)} m/s` : "-"],
+    ["航向", Number.isFinite(normalizedHeading) ? `${normalizedHeading.toFixed(2)}°` : "-"],
+    ["位置", validCoord(aircraft.lat, aircraft.lng) ? `${Number(aircraft.lat).toFixed(2)}, ${Number(aircraft.lng).toFixed(2)}` : "-"],
     ["任务", aircraft.mission_status || "-"],
   ];
 }
@@ -126,10 +130,14 @@ function renderState(state) {
   const telemetry = state.telemetry || {};
   const aircraft = state.aircraft || {};
   els.cloudDot.classList.toggle("online", Boolean(state.online));
-  els.cloudText.textContent = state.online ? "涂鸦云在线" : "涂鸦云离线";
+  const fresh = state.state_fresh === true;
+  const age = Number(state.state_age_sec);
+  els.cloudText.textContent = state.online
+    ? (fresh ? "涂鸦云在线" : `云状态过期 ${Number.isFinite(age) ? `${age.toFixed(1)}s` : ""}`)
+    : "涂鸦云离线";
   renderMetrics(els.roverGrid, [
     ["模式", telemetry.flight_mode || "-"],
-    ["解锁", telemetry.armed ? "YES" : "NO"],
+    ["解锁", fresh ? (telemetry.armed ? "YES" : "NO") : "过期"],
     ["电量", `${telemetry.battery_percent ?? "-"}%`],
     ["速度", `${telemetry.ground_speed ?? "-"} m/s`],
     ["LTE", `${telemetry.lte_rssi ?? "-"} dBm`],
@@ -139,7 +147,7 @@ function renderState(state) {
 
   const blocked = Boolean(state.optical?.blocked);
   els.blocked.hidden = !blocked;
-  els.aircraftContent.hidden = blocked;
+  els.aircraftContent.hidden = false;
   els.opticalBadge.textContent = blocked ? "BLOCKED" : aircraft.status || "LOCKED";
   els.opticalBadge.classList.toggle("locked", !blocked);
   for (const button of document.querySelectorAll("[data-aircraft-command]")) {
@@ -149,13 +157,17 @@ function renderState(state) {
   updateMissionButton();
   if (blocked) {
     els.aircraftGrid.innerHTML = "";
-    els.aircraftMessages.innerHTML = "";
+    els.aircraftMessages.innerHTML =
+      '<div class="aircraft-message blocked-message">OPTICAL LINK BLOCKED</div>';
     messageHistory.length = 0;
   } else {
     renderMetrics(els.aircraftGrid, aircraftDetails(aircraft));
+    const heartbeatMessages = aircraft.messages
+      .map((message) => Core.aircraftHeartbeatSummary(message, aircraft.armed))
+      .filter(Boolean);
     const merged = Core.appendAircraftMessages(
       messageHistory,
-      aircraft.messages,
+      heartbeatMessages,
       state.cloud_received_at,
     );
     messageHistory.splice(0, messageHistory.length, ...merged);
@@ -163,17 +175,19 @@ function renderState(state) {
   }
 
   updateMapFromState(telemetry, aircraft);
-  updateTaskBanner(telemetry);
+  updateTaskBanner(telemetry, state.state_fresh === true);
   checkAlerts(telemetry);
   renderQueue();
 }
 
-function updateTaskBanner(telemetry) {
+function updateTaskBanner(telemetry, stateFresh = true) {
   const stage = String(telemetry.rover_tx_stage || "");
   const status = String(telemetry.mission_status || "待命");
   const fault = String(telemetry.fault_text || "");
   let title = "待命";
-  let detail = "涂鸦云在线，等待任务";
+  let detail = stateFresh
+    ? "涂鸦云在线，等待任务"
+    : "涂鸦云在线，但小车状态尚未刷新";
   let tone = "idle";
   if (fault || /fail|reject|unsafe|mismatch/i.test(`${stage} ${status}`)) {
     title = "任务失败";

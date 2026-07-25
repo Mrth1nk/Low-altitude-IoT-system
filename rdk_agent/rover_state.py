@@ -22,6 +22,7 @@ def compact_json_bytes(data: dict[str, Any], max_bytes: int = 480) -> str:
     aircraft = data.get("aircraft")
     if isinstance(aircraft, dict):
         curated_keys = (
+            "updated_at",
             "lat",
             "lng",
             "ground_speed",
@@ -30,49 +31,109 @@ def compact_json_bytes(data: dict[str, Any], max_bytes: int = 480) -> str:
             "flight_mode",
             "lte_rssi",
             "fc_link",
-            "gps_fix_type",
-            "satellites_visible",
-            "mission_status",
-            "rover_tx_stage",
-            "rover_tx_id",
-            "rover_tx_pending",
-            "aircraft_tx_stage",
-            "aircraft_tx_id",
-            "aircraft_tx_pending",
-            "aircraft_mission_status",
-            "aircraft_fault_text",
-            "aircraft_command_event",
-            "aircraft_command_event_id",
-            "aircraft_command_fault",
             "last_command",
             "aircraft_link",
             "aircraft_age",
-            "aircraft_packets",
-            "aircraft_msg",
-            "aircraft_msg_time",
         )
         messages = aircraft.get("messages")
         if isinstance(messages, list):
+            valid_messages = [item for item in messages if isinstance(item, dict)]
+            latest_heartbeat = next(
+                (
+                    item for item in reversed(valid_messages)
+                    if str(item.get("type", "")).upper() == "HEARTBEAT"
+                ),
+                None,
+            )
             for keep in (4, 3, 2, 1):
+                selected_messages = valid_messages[-keep:]
+                if latest_heartbeat and latest_heartbeat not in selected_messages:
+                    selected_messages = (
+                        [latest_heartbeat]
+                        if keep == 1
+                        else [latest_heartbeat, *selected_messages[-(keep - 1):]]
+                    )
                 compact_aircraft = {
                     "link_active": aircraft.get("link_active"),
                     "last_seen_age_sec": aircraft.get("last_seen_age_sec"),
-                    "packets_received": aircraft.get("packets_received"),
-                    "messages": [
-                        {
-                            "time": item.get("time"),
-                            "type": str(item.get("type", "MSG"))[:16],
-                            "text": str(item.get("text", ""))[:120],
-                        }
-                        for item in messages[-keep:]
-                        if isinstance(item, dict)
-                    ],
+                    "mode": data.get("aircraft_mode"),
+                    "armed": data.get("aircraft_armed"),
+                    "battery_percent": data.get("aircraft_battery_percent"),
+                    "lat": data.get("aircraft_lat"),
+                    "lng": data.get("aircraft_lng"),
+                    "altitude": data.get("aircraft_altitude"),
+                    "ground_speed": data.get("aircraft_ground_speed"),
+                    "heading": data.get("aircraft_heading"),
+                    "mission_status": data.get("aircraft_mission_status"),
                 }
+                compact_aircraft = {
+                    key: value for key, value in compact_aircraft.items() if value is not None
+                }
+                compact_aircraft["messages"] = [
+                    {
+                        "time": item.get("time"),
+                        "type": str(item.get("type", "MSG"))[:16],
+                        "text": str(item.get("text", ""))[:120],
+                    }
+                    for item in selected_messages
+                ]
                 prioritized = {key: data[key] for key in curated_keys if key in data}
                 prioritized["aircraft"] = compact_aircraft
                 text = dump(prioritized)
                 if len(text.encode("utf-8")) <= max_bytes:
                     return text
+
+            heartbeat = (
+                latest_heartbeat
+                or next(
+                    (item for item in reversed(valid_messages)),
+                    None,
+                )
+            )
+            essential_aircraft = {
+                "link_active": aircraft.get("link_active"),
+                "mode": data.get("aircraft_mode"),
+                "armed": data.get("aircraft_armed"),
+                "battery_percent": data.get("aircraft_battery_percent"),
+                "lat": data.get("aircraft_lat"),
+                "lng": data.get("aircraft_lng"),
+                "altitude": data.get("aircraft_altitude"),
+                "ground_speed": data.get("aircraft_ground_speed"),
+                "heading": data.get("aircraft_heading"),
+                "messages": (
+                    [{
+                        "time": heartbeat.get("time"),
+                        "type": str(heartbeat.get("type", "MSG"))[:16],
+                        "text": str(heartbeat.get("text", ""))[:96],
+                    }]
+                    if heartbeat
+                    else []
+                ),
+            }
+            for key in ("lat", "lng"):
+                if isinstance(essential_aircraft.get(key), (int, float)):
+                    essential_aircraft[key] = round(essential_aircraft[key], 7)
+            for key in ("altitude", "ground_speed", "heading"):
+                if isinstance(essential_aircraft.get(key), (int, float)):
+                    essential_aircraft[key] = round(essential_aircraft[key], 2)
+            essential_aircraft = {
+                key: value
+                for key, value in essential_aircraft.items()
+                if value is not None
+            }
+            essential = {
+                key: data[key]
+                for key in (
+                    "updated_at", "lat", "lng", "ground_speed", "heading",
+                    "battery_percent", "armed", "flight_mode", "lte_rssi",
+                    "last_command", "aircraft_link",
+                )
+                if key in data
+            }
+            essential["aircraft"] = essential_aircraft
+            text = dump(essential)
+            if len(text.encode("utf-8")) <= max_bytes:
+                return text
 
         smaller = dict(data)
         compact_aircraft = dict(aircraft)
@@ -120,6 +181,7 @@ def compact_json_bytes(data: dict[str, Any], max_bytes: int = 480) -> str:
 
     fallback = dict(data)
     curated_keys = (
+        "updated_at",
         "lat",
         "lng",
         "altitude",
@@ -152,6 +214,15 @@ def compact_json_bytes(data: dict[str, Any], max_bytes: int = 480) -> str:
         "aircraft_packets",
         "aircraft_msg",
         "aircraft_msg_time",
+        "aircraft_mode",
+        "aircraft_armed",
+        "aircraft_battery_percent",
+        "aircraft_lat",
+        "aircraft_lng",
+        "aircraft_altitude",
+        "aircraft_ground_speed",
+        "aircraft_heading",
+        "aircraft_mission_status",
     )
     fallback = {key: data[key] for key in curated_keys if key in data}
     if "aircraft_msg" in fallback:
@@ -160,7 +231,50 @@ def compact_json_bytes(data: dict[str, Any], max_bytes: int = 480) -> str:
     if len(text.encode("utf-8")) <= max_bytes:
         return text
     fallback["aircraft_msg"] = str(fallback.get("aircraft_msg", ""))[:24]
-    return dump(fallback)
+    text = dump(fallback)
+    if len(text.encode("utf-8")) <= max_bytes:
+        return text
+
+    removable = (
+        "aircraft_command_fault",
+        "aircraft_command_event_id",
+        "aircraft_msg_time",
+        "aircraft_age",
+        "aircraft_packets",
+        "aircraft_msg",
+        "aircraft_fault_text",
+        "aircraft_mission_status",
+        "aircraft_tx_id",
+        "rover_tx_id",
+        "satellites_visible",
+        "gps_fix_type",
+        "mission_status",
+    )
+    for key in removable:
+        fallback.pop(key, None)
+        text = dump(fallback)
+        if len(text.encode("utf-8")) <= max_bytes:
+            return text
+
+    # Core telemetry alone is comfortably below the product DP limit.
+    core_keys = (
+        "updated_at",
+        "lat",
+        "lng",
+        "ground_speed",
+        "heading",
+        "battery_percent",
+        "armed",
+        "flight_mode",
+        "lte_rssi",
+        "fc_link",
+        "steering",
+        "throttle",
+        "last_command",
+        "aircraft_link",
+        "aircraft_command_event",
+    )
+    return dump({key: fallback[key] for key in core_keys if key in fallback})
 
 
 @dataclass
@@ -212,6 +326,7 @@ class RoverTelemetry:
 
     def data(self) -> dict[str, Any]:
         data = {
+            "updated_at": round(time.time(), 3),
             "lat": round(float(self.lat), 7),
             "lng": round(float(self.lng), 7),
             "altitude": round(float(self.altitude), 2),
@@ -321,7 +436,6 @@ class RoverTelemetry:
             data.update(extra_state)
         cloud_data = {
             "rover_state": compact_json_bytes(data),
-            "command": str(data["last_command"]),
             "target_lat": str(data["target_lat"]),
             "target_lng": str(data["target_lng"]),
             "target_speed": str(data["target_speed"]),

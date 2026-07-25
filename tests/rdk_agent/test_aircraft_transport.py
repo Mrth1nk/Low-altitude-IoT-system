@@ -102,6 +102,48 @@ class AircraftTransportTests(unittest.TestCase):
         self.assertEqual(self.link.pending_count, 0)
         self.assertEqual(self.transport.transaction_state()["stage"], "acknowledged")
 
+    def test_execute_uses_reliable_authenticated_queue_not_raw_mavlink(self):
+        self.send_status()
+        result = self.transport.execute(
+            CloudCommand(
+                self.command_id,
+                time.time(),
+                "aircraft",
+                "mission_begin",
+                {
+                    "mission_id": "mission-1",
+                    "item_count": 1,
+                    "vehicle": "aircraft",
+                    "checksum": "a" * 64,
+                },
+            )
+        )
+
+        self.assertEqual(result["stage"], "mission_begin")
+        self.assertEqual(self.link.pending_count, 1)
+        self.transport.pump(now=self.now)
+        frame, _ = self.receive_frame()
+        self.assertEqual(frame.message_type, MessageType.MISSION_BEGIN)
+        self.assertEqual(frame.command_id, self.command_id)
+
+    def test_simple_command_uses_raw_mavlink2_without_occupying_mission_queue(self):
+        self.send_status()
+        guided = CloudCommand(
+            self.command_id, time.time(), "aircraft", "guided", {}
+        )
+        loiter = CloudCommand(
+            uuid.uuid4(), time.time(), "aircraft", "loiter", {}
+        )
+
+        first = self.transport.execute(guided)
+
+        self.assertEqual(first["stage"], "sent_mavlink2")
+        self.assertEqual(self.link.pending_count, 0)
+        packet, _sender = self.peer.recvfrom(4096)
+        self.assertEqual(packet[0], 0xFD)
+        self.assertIn(packet[7] | (packet[8] << 8) | (packet[9] << 16), (11, 76))
+        self.assertEqual(self.transport.execute(loiter)["stage"], "sent_mavlink2")
+
     def test_authenticated_challenge_is_answered_before_command_retry(self):
         challenge = Frame(
             MessageType.AUTH_CHALLENGE,
@@ -119,6 +161,35 @@ class AircraftTransportTests(unittest.TestCase):
         self.assertEqual(response.message_type, MessageType.AUTH_RESPONSE)
         self.assertEqual(response.payload["challenge"], "ab" * 32)
         self.assertEqual(sender, self.transport.local_address)
+
+    def test_valid_mavlink_observer_marks_optical_link_locked(self):
+        seen = []
+        self.transport._packet_observer = (
+            lambda data, remote: seen.append((data, remote)) or True
+        )
+        self.peer.sendto(b"\xfd\x00mavlink", self.transport.local_address)
+        time.sleep(0.005)
+        self.transport.pump(now=1.0)
+
+        self.assertEqual(self.transport.optical_state(), "locked")
+        self.assertEqual(self.transport.status()["link_detail"], "mavlink_telemetry")
+        self.assertEqual(seen[0][0], b"\xfd\x00mavlink")
+
+    def test_blocked_transport_sends_periodic_bootstrap_probe_to_register_udp_peer(self):
+        self.transport.pump(now=0.0)
+        probe, sender = self.receive_frame()
+
+        self.assertEqual(probe.message_type, MessageType.AUTH_CHALLENGE)
+        self.assertEqual(sender, self.transport.local_address)
+
+        self.peer.settimeout(0.03)
+        self.transport.pump(now=0.5)
+        with self.assertRaises(socket.timeout):
+            self.peer.recvfrom(4096)
+
+        self.transport.pump(now=1.0)
+        retry, _ = self.receive_frame()
+        self.assertEqual(retry.message_type, MessageType.AUTH_CHALLENGE)
 
     def test_reassembles_authenticated_serial_stream_split_across_udp_packets(self):
         frame = Frame(
@@ -288,9 +359,8 @@ class AircraftTransportTests(unittest.TestCase):
         time.sleep(0.005)
         self.transport.pump(self.now)
 
-        self.peer.settimeout(0.03)
-        with self.assertRaises(socket.timeout):
-            self.peer.recvfrom(4096)
+        bootstrap, _ = self.receive_frame()
+        self.assertEqual(bootstrap.message_type, MessageType.AUTH_CHALLENGE)
         state = self.transport.transaction_state()
         self.assertEqual(state["stage"], "link_blocked")
         self.assertEqual(state["pending"], 0)

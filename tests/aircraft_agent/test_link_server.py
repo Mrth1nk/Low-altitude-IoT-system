@@ -68,7 +68,7 @@ class AircraftLinkServerTests(unittest.TestCase):
         )
         self.assertEqual(self.server.peer_session_nonce, b"R" * 16)
 
-    def test_requires_fresh_challenge_before_accepting_command(self):
+    def test_first_hmac_authenticated_command_establishes_session(self):
         self.gate.set_locked(timestamp=self.now)
         command = Frame(
             MessageType.COMMAND,
@@ -78,21 +78,12 @@ class AircraftLinkServerTests(unittest.TestCase):
             {"action": "guided", "parameters": {}},
         )
 
-        unauthenticated = self.decode_responses(
-            self.server.feed_bytes(self.wire(command))
-        )
-        self.assertEqual(
-            [frame.message_type for frame in unauthenticated],
-            [MessageType.AUTH_CHALLENGE],
-        )
-        self.assertIsNone(self.inbox.active)
-
-        self.authenticate()
         accepted = self.decode_responses(
             self.server.feed_bytes(self.wire(command))
         )
         self.assertEqual(accepted[0].message_type, MessageType.ACK)
         self.assertEqual(self.inbox.active["command_id"], str(command.command_id))
+        self.assertEqual(self.server.peer_session_nonce, b"R" * 16)
 
     def test_new_peer_session_nonce_must_reauthenticate(self):
         self.gate.set_locked(timestamp=self.now)
@@ -143,7 +134,7 @@ class AircraftLinkServerTests(unittest.TestCase):
             0,
             5,
             uuid.UUID(int=0),
-            {"challenge": "43" * 32},
+            {"challenge": self.server.challenge},
         )
         packet = self.wire(response)
 
@@ -229,17 +220,51 @@ class AircraftLinkServerTests(unittest.TestCase):
             0,
             9,
             uuid.UUID(int=0),
-            {"challenge": "43" * 32},
+            {"challenge": self.server.challenge},
         )
         packet = self.wire(response)
         stream.reads.extend([packet[:7], packet[7:]])
 
-        self.assertEqual(self.server.pump_once(), 1)
-        self.assertEqual(self.server.pump_once(), 1)
+        self.assertEqual(self.server.pump_once(), 0)
+        self.assertEqual(self.server.pump_once(), 2)
         decoded = self.decode_responses(stream.writes)
         self.assertIn(
             "authenticated", [frame.payload.get("state") for frame in decoded]
         )
+
+    def test_serial_envelope_is_not_forwarded_as_raw_flight_controller_data(self):
+        forwarded = []
+
+        class Stream:
+            def __init__(self, packet):
+                self.packet = packet
+                self.writes = []
+
+            def read(self, size):
+                del size
+                packet, self.packet = self.packet, b""
+                return packet
+
+            def write(self, data):
+                self.writes.append(data)
+                return len(data)
+
+        self.gate.set_locked(timestamp=self.now)
+        response = Frame(
+            MessageType.AUTH_RESPONSE,
+            0,
+            9,
+            uuid.UUID(int=0),
+            {"challenge": self.server.challenge},
+        )
+        stream = Stream(self.wire(response))
+        self.server.stream = stream
+        self.server.mavlink_sink = forwarded.append
+
+        self.server.pump_once()
+
+        self.assertEqual(forwarded, [])
+        self.assertEqual(self.server.peer_session_nonce, b"R" * 16)
 
     def test_idle_serial_pump_publishes_gate_status_without_extra_wiring(self):
         class Stream:
@@ -256,6 +281,7 @@ class AircraftLinkServerTests(unittest.TestCase):
         stream = Stream()
         self.server.stream = stream
         self.gate.set_locked(timestamp=self.now)
+        self.authenticate()
 
         sent = self.server.pump_once(snapshot={"mode": "GUIDED"})
 
@@ -263,6 +289,20 @@ class AircraftLinkServerTests(unittest.TestCase):
         frame = self.decode_responses(stream.writes)[0]
         self.assertEqual(frame.message_type, MessageType.STATUS)
         self.assertIn("GUIDED", frame.payload["detail"])
+
+    def test_raw_mavlink2_is_forwarded_only_when_optical_link_is_locked(self):
+        forwarded = []
+        packet = bytes.fromhex("fd0000000101010b00000000")
+
+        self.server.mavlink_sink = forwarded.append
+        self.gate.set_locked(timestamp=self.now)
+        self.server.feed_bytes(packet)
+        self.assertEqual(forwarded, [packet])
+
+        forwarded.clear()
+        self.gate.set_blocked("beam_interrupted", timestamp=self.now)
+        self.server.feed_bytes(packet)
+        self.assertEqual(forwarded, [])
 
     def test_authentication_while_blocked_does_not_leak_status_snapshot(self):
         challenge = self.decode_responses(
@@ -287,6 +327,9 @@ class AircraftLinkServerTests(unittest.TestCase):
         self.assertIn("timestamp", frames[0].payload)
 
     def test_poll_emits_only_gate_selected_status_at_one_hertz(self):
+        self.assertEqual(self.server.poll_status({"mode": "GUIDED"}), [])
+        self.authenticate()
+
         blocked = self.decode_responses(
             self.server.poll_status({"mode": "GUIDED"})
         )
