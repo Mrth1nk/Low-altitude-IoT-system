@@ -63,6 +63,51 @@ test("stale rover and aircraft state cannot be presented as live or commandable"
   assert.equal(state.aircraft.link_active, false);
   assert.equal(aircraftCommandsAllowed(state), false);
 });
+
+test("fresh nested aircraft heartbeat remains commandable", () => {
+  const state = normalizeCloudState([{
+    code: "rover_state",
+    value: JSON.stringify({
+      updated_at: 1710000000,
+      aircraft_link: true,
+      aircraft: {
+        link_active: true,
+        mode: "GUIDED",
+        armed: false,
+        messages: [{
+          time: 1710000000,
+          type: "HEARTBEAT",
+          text: "GUIDED armed=NO",
+        }],
+      },
+    }),
+  }], 1710000001000);
+
+  assert.equal(state.aircraft.link_active, true);
+  assert.equal(state.optical.blocked, false);
+  assert.equal(aircraftCommandsAllowed(state), true);
+});
+
+test("fresh explicit aircraft link loss becomes a timed blocked message", () => {
+  const state = normalizeCloudState([{
+    code: "rover_state",
+    value: JSON.stringify({
+      updated_at: 1710000000,
+      aircraft_link: false,
+      aircraft_msg_time: 1709999999,
+      aircraft: {link_active: false, messages: []},
+    }),
+  }], 1710000001000);
+
+  assert.equal(state.optical.blocked, true);
+  assert.deepEqual(state.aircraft.messages, [{
+    time: 1709999999,
+    type: "OPTICAL",
+    text: "BLOCKED",
+    key: "optical-blocked-1709999999",
+  }]);
+  assert.equal(aircraftCommandsAllowed(state), false);
+});
 test("blocked optical state clears aircraft detail and rejects every aircraft command", () => {
   const state = normalizeCloudState([
     {

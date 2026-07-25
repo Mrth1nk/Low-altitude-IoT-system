@@ -133,6 +133,21 @@
       : null;
     const stateFresh = stateAgeSec !== null && stateAgeSec <= 8;
     const aircraft = normalizeAircraft(telemetry, cloudReceivedAt);
+    if (
+      !aircraft.blocked
+      && stateFresh
+      && telemetry.aircraft_link === false
+    ) {
+      const blockedAt = Number(telemetry.aircraft_msg_time) || cloudReceivedAt;
+      aircraft.blocked = true;
+      aircraft.status = "OPTICAL LINK BLOCKED";
+      aircraft.messages = [{
+        time: blockedAt,
+        type: "OPTICAL",
+        text: "BLOCKED",
+        key: `optical-blocked-${blockedAt}`,
+      }];
+    }
     const aircraftAge = Number(aircraft.last_seen_age_sec);
     const aircraftFresh = stateFresh
       && Boolean(aircraft.link_active)
@@ -143,17 +158,24 @@
         telemetry.aircraft_link || aircraft.link_active,
       );
       const hasStructuredHeartbeat = Boolean(
-        telemetry.aircraft_mode
-        && typeof telemetry.aircraft_armed === "boolean",
+        (telemetry.aircraft_mode || aircraft.mode)
+        && (
+          typeof telemetry.aircraft_armed === "boolean"
+          || typeof aircraft.armed === "boolean"
+        ),
       );
       aircraft.link_active = stateFresh
         && (aircraftFresh || (structuredLink && hasStructuredHeartbeat));
       if (hasStructuredHeartbeat && !aircraft.messages.length) {
+        const heartbeatMode = telemetry.aircraft_mode || aircraft.mode;
+        const heartbeatArmed = typeof telemetry.aircraft_armed === "boolean"
+          ? telemetry.aircraft_armed
+          : aircraft.armed;
         aircraft.messages = [{
           time: Number(telemetry.aircraft_msg_time) || cloudReceivedAt,
           type: "HEARTBEAT",
-          text: `${String(telemetry.aircraft_mode).toUpperCase()} armed=${
-            telemetry.aircraft_armed ? "YES" : "NO"
+          text: `${String(heartbeatMode).toUpperCase()} armed=${
+            heartbeatArmed ? "YES" : "NO"
           }`,
           key: `structured-heartbeat-${telemetry.aircraft_msg_time || cloudReceivedAt}`,
         }];
