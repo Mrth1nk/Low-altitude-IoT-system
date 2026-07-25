@@ -18,6 +18,16 @@ from .optical_state import OpticalStateMachine
 from .precision_landing import send_landing_target
 
 
+def reopen_camera(capture_factory, camera_device, previous=None):
+    if previous is not None:
+        previous.release()
+    camera = capture_factory(camera_device)
+    if camera.isOpened():
+        return camera
+    camera.release()
+    return None
+
+
 class PreviewServer:
     def __init__(self, host, port):
         self.latest = None
@@ -130,8 +140,8 @@ def run():
         source_system=254,
     )
     master.wait_heartbeat(timeout=10)
-    camera = cv2.VideoCapture(camera_device)
-    if not camera.isOpened():
+    camera = reopen_camera(cv2.VideoCapture, camera_device)
+    if camera is None:
         raise RuntimeError(f"camera unavailable: {camera_device}")
     preview = PreviewServer(
         os.environ.get("VISION_STREAM_HOST", "0.0.0.0"),
@@ -197,8 +207,21 @@ def run():
                     altitude_source = "relative_altitude"
                 message = master.recv_match(blocking=False)
 
-            ok, frame = camera.read()
             wall_timestamp = time.time()
+            if camera is None:
+                camera = reopen_camera(cv2.VideoCapture, camera_device)
+                if camera is None:
+                    publisher.publish(
+                        locked=False,
+                        confidence=0.0,
+                        area=0.0,
+                        mode=mode,
+                        timestamp=wall_timestamp,
+                        last_error="camera_unavailable",
+                    )
+                    time.sleep(0.20)
+                    continue
+            ok, frame = camera.read()
             if not ok:
                 publisher.publish(
                     locked=False,
@@ -208,7 +231,12 @@ def run():
                     timestamp=wall_timestamp,
                     last_error="camera_frame_failed",
                 )
-                time.sleep(0.02)
+                camera = reopen_camera(
+                    cv2.VideoCapture,
+                    camera_device,
+                    camera,
+                )
+                time.sleep(0.20 if camera is None else 0.05)
                 continue
             gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
             now = time.monotonic()
@@ -261,7 +289,8 @@ def run():
             timestamp=time.time(),
             last_error="vision_stopped",
         )
-        camera.release()
+        if camera is not None:
+            camera.release()
         preview.close()
         master.close()
 
