@@ -16,10 +16,15 @@ from shared_protocol.auth import (
 )
 from shared_protocol.frame import (
     Frame,
+    FrameDecoder,
     FrameError,
     MessageType,
     decode_frame,
     encode_frame,
+)
+from shared_protocol.mavlink_extension import (
+    unwrap_liot_frame,
+    wrap_liot_frame,
 )
 
 
@@ -50,6 +55,7 @@ class AircraftTransport:
         max_retry_backoff=4.0,
         auth_store=None,
         packet_observer=None,
+        plaintext=False,
     ):
         if peer is None:
             raise ValueError("an exact aircraft peer is required")
@@ -68,9 +74,9 @@ class AircraftTransport:
         )
         if self._command_peer[0] != self._peer[0]:
             raise ValueError("command peer host must match aircraft peer host")
-        # The telemetry module emits toward the RDK's 14560 listener, while
-        # its proven aircraft-side command ingress is the peer's 14555 port.
-        # Use one destination so authenticated counters cannot be replayed.
+        # The module accepts downlink frames on 14555 and emits telemetry
+        # toward the RDK listener on 14560. Keep reliable traffic on the
+        # proven downlink port and never duplicate a mission frame.
         self._command_peers = (self._peer,)
         self._auth = (
             PersistentAuthSession(psk, auth_store)
@@ -104,6 +110,8 @@ class AircraftTransport:
         self._bootstrap_sequence = 0
         self._decoder = AuthenticatedStreamDecoder()
         self._packet_observer = packet_observer
+        self._plaintext = bool(plaintext)
+        self._plain_decoder = FrameDecoder(max_payload_length=8192)
         self._socket = self._create_socket()
 
     @property
@@ -206,6 +214,8 @@ class AircraftTransport:
         return self.transaction_state()
 
     def _send_bootstrap(self, now):
+        if self._plaintext:
+            return
         if now < self._next_bootstrap_at:
             return
         probe = Frame(
@@ -239,6 +249,11 @@ class AircraftTransport:
             ):
                 self._rx_wrong_peer += 1
                 continue
+            extension = unwrap_liot_frame(data) if self._plaintext else None
+            if extension is not None:
+                for frame in self._plain_decoder.feed(extension):
+                    self._process_frame(frame, now)
+                continue
             if self._packet_observer is not None:
                 try:
                     if self._packet_observer(data, remote):
@@ -250,8 +265,12 @@ class AircraftTransport:
                     self._transport_error = (
                         f"packet observer failed: {exc}"
                     )[:120]
-            for envelope in self._decoder.feed(data):
-                self._process_envelope(envelope, now)
+            if self._plaintext:
+                for frame in self._plain_decoder.feed(data):
+                    self._process_frame(frame, now)
+            else:
+                for envelope in self._decoder.feed(data):
+                    self._process_envelope(envelope, now)
 
     def _process_envelope(self, envelope, now):
         try:
@@ -325,7 +344,12 @@ class AircraftTransport:
             # Each UDP destination gets a distinct authenticated counter. Some
             # serial telemetry modules mirror both configured ports, so sharing
             # one envelope would trigger replay rejection at the aircraft.
-            self._socket.sendto(self._seal(payload), peer)
+            wire = (
+                wrap_liot_frame(payload)
+                if self._plaintext
+                else self._seal(payload)
+            )
+            self._socket.sendto(wire, peer)
 
     def _open(self, datagram):
         opened = self._auth.open(datagram)

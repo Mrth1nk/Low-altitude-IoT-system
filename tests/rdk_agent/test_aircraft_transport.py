@@ -12,6 +12,10 @@ from rdk_agent.aircraft_transport import AircraftTransport, legacy_gateway_ports
 from rdk_agent.command_router import CloudCommand, CommandRouter, RuntimeCommandAPI
 from shared_protocol.auth import AuthenticatedDatagramCodec
 from shared_protocol.frame import Frame, MessageType, decode_frame, encode_frame
+from shared_protocol.mavlink_extension import (
+    unwrap_liot_frame,
+    wrap_liot_frame,
+)
 from aircraft_agent.state_store import AtomicJsonStore
 
 
@@ -125,6 +129,81 @@ class AircraftTransportTests(unittest.TestCase):
         frame, _ = self.receive_frame()
         self.assertEqual(frame.message_type, MessageType.MISSION_BEGIN)
         self.assertEqual(frame.command_id, self.command_id)
+
+    def test_plaintext_mode_sends_crc_frame_and_accepts_plain_ack(self):
+        transport = AircraftTransport(
+            self.link,
+            local_host="127.0.0.1",
+            local_port=0,
+            peer=self.peer.getsockname(),
+            psk=self.key,
+            clock=lambda: self.now,
+            plaintext=True,
+        )
+        try:
+            transport._optical_state = "locked"
+            transport._last_locked_at = self.now
+            self.queue()
+            transport.pump(now=self.now)
+            data, _sender = self.peer.recvfrom(4096)
+            command = decode_frame(unwrap_liot_frame(data))
+            ack = Frame(
+                MessageType.ACK,
+                0,
+                91,
+                command.command_id,
+                {"acked_sequence": command.sequence},
+            )
+            self.peer.sendto(
+                wrap_liot_frame(encode_frame(ack)),
+                transport.local_address,
+            )
+            time.sleep(0.005)
+            transport.pump(now=self.now)
+            self.assertEqual(self.link.pending_count, 0)
+        finally:
+            transport.close()
+
+    def test_reliable_frames_use_proven_14555_module_downlink(self):
+        command_peer = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        command_peer.bind(("127.0.0.1", 0))
+        command_peer.settimeout(0.2)
+        transport = AircraftTransport(
+            AircraftLink(),
+            local_host="127.0.0.1",
+            local_port=0,
+            peer=self.peer.getsockname(),
+            command_peer=command_peer.getsockname(),
+            psk=self.key,
+            clock=lambda: self.now,
+        )
+        try:
+            transport._optical_state = "locked"
+            transport._last_locked_at = self.now
+            transport.execute(
+                CloudCommand(
+                    self.command_id,
+                    time.time(),
+                    "aircraft",
+                    "mission_begin",
+                    {
+                        "mission_id": "mission-port",
+                        "item_count": 1,
+                        "vehicle": "aircraft",
+                        "checksum": "b" * 64,
+                    },
+                )
+            )
+            transport.pump(now=self.now)
+
+            data, _sender = self.peer.recvfrom(4096)
+            frame = decode_frame(self.peer_auth.open(data))
+            self.assertEqual(frame.message_type, MessageType.MISSION_BEGIN)
+            with self.assertRaises(socket.timeout):
+                command_peer.recvfrom(4096)
+        finally:
+            transport.close()
+            command_peer.close()
 
     def test_simple_command_uses_raw_mavlink2_without_occupying_mission_queue(self):
         self.send_status()

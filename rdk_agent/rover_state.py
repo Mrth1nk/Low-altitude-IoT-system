@@ -34,6 +34,10 @@ def compact_json_bytes(data: dict[str, Any], max_bytes: int = 480) -> str:
             "last_command",
             "aircraft_link",
             "aircraft_age",
+            "aircraft_tx_stage",
+            "aircraft_tx_pending",
+            "aircraft_mission_status",
+            "aircraft_fault_text",
         )
         messages = aircraft.get("messages")
         if isinstance(messages, list):
@@ -90,6 +94,45 @@ def compact_json_bytes(data: dict[str, Any], max_bytes: int = 480) -> str:
                     None,
                 )
             )
+            aircraft_stage = str(data.get("aircraft_tx_stage", "") or "")
+            if aircraft_stage.lower() not in ("", "idle"):
+                mission_aircraft = {
+                    "link_active": aircraft.get("link_active"),
+                    "mode": data.get("aircraft_mode"),
+                    "armed": data.get("aircraft_armed"),
+                    "altitude": data.get("aircraft_altitude"),
+                    "ground_speed": data.get("aircraft_ground_speed"),
+                    "heading": data.get("aircraft_heading"),
+                    "messages": (
+                        [{
+                            "time": heartbeat.get("time"),
+                            "type": str(heartbeat.get("type", "MSG"))[:16],
+                            "text": str(heartbeat.get("text", ""))[:72],
+                        }]
+                        if heartbeat
+                        else []
+                    ),
+                }
+                mission_aircraft = {
+                    key: value
+                    for key, value in mission_aircraft.items()
+                    if value is not None
+                }
+                mission_state = {
+                    key: data[key]
+                    for key in (
+                        "updated_at", "flight_mode", "lte_rssi",
+                        "last_command", "aircraft_link",
+                        "aircraft_tx_stage", "aircraft_tx_pending",
+                        "aircraft_mission_status", "aircraft_fault_text",
+                    )
+                    if key in data and data[key] not in (None, "")
+                }
+                mission_state["aircraft"] = mission_aircraft
+                text = dump(mission_state)
+                if len(text.encode("utf-8")) <= max_bytes:
+                    return text
+
             essential_aircraft = {
                 "link_active": aircraft.get("link_active"),
                 "mode": data.get("aircraft_mode"),

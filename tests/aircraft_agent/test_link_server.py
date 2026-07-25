@@ -9,6 +9,10 @@ from aircraft_agent.optical_gate import OpticalGate
 from aircraft_agent.state_store import AtomicJsonStore
 from shared_protocol.auth import AuthenticatedDatagramCodec
 from shared_protocol.frame import Frame, MessageType, decode_frame, encode_frame
+from shared_protocol.mavlink_extension import (
+    unwrap_liot_frame,
+    wrap_liot_frame,
+)
 
 
 KEY = b"aircraft-link-server-test-key!!!!"
@@ -84,6 +88,31 @@ class AircraftLinkServerTests(unittest.TestCase):
         self.assertEqual(accepted[0].message_type, MessageType.ACK)
         self.assertEqual(self.inbox.active["command_id"], str(command.command_id))
         self.assertEqual(self.server.peer_session_nonce, b"R" * 16)
+
+    def test_plaintext_mode_accepts_crc_frame_and_returns_plain_ack(self):
+        self.gate.set_locked(timestamp=self.now)
+        server = AircraftLinkServer(
+            self.inbox,
+            self.gate,
+            psk=KEY,
+            auth_store=AtomicJsonStore(Path(self.tmp.name) / "plain-auth.json"),
+            max_payload=1024,
+            plaintext=True,
+        )
+        command = Frame(
+            MessageType.COMMAND,
+            0,
+            12,
+            uuid.uuid4(),
+            {"action": "guided", "parameters": {}},
+        )
+
+        responses = server.feed_bytes(wrap_liot_frame(encode_frame(command)))
+
+        self.assertEqual(len(responses), 1)
+        ack = decode_frame(unwrap_liot_frame(responses[0]))
+        self.assertEqual(ack.message_type, MessageType.ACK)
+        self.assertEqual(ack.command_id, command.command_id)
 
     def test_new_peer_session_nonce_must_reauthenticate(self):
         self.gate.set_locked(timestamp=self.now)

@@ -318,6 +318,10 @@ def run_agent(config: dict) -> int:
             data,
             remote,
         ),
+        plaintext=(
+            bool(config.get("aircraft_link_plaintext", False))
+            or os.environ.get("AIRCRAFT_LINK_PLAINTEXT", "0") == "1"
+        ),
     )
 
     def aircraft_optical_state():

@@ -332,6 +332,7 @@ def run():
         auth_store=AtomicJsonStore(state_dir / "auth.json"),
         stream=stream,
         mavlink_sink=session.write_raw,
+        plaintext=os.environ.get("AIRCRAFT_LINK_PLAINTEXT", "0") == "1",
     )
     health = HealthSnapshotWriter(
         AtomicJsonStore(runtime_dir / "aircraft-health.json", max_bytes=64 * 1024)
@@ -346,7 +347,9 @@ def run():
 
     signal.signal(signal.SIGTERM, request_stop)
     signal.signal(signal.SIGINT, request_stop)
-    stream.write(server.challenge_datagram())
+    challenge = server.challenge_datagram()
+    if challenge:
+        stream.write(challenge)
     try:
         while not stop.is_set():
             optical = optical_reader.read()

@@ -198,6 +198,40 @@ class RoverStateTests(unittest.TestCase):
         self.assertEqual(payload["aircraft"]["lat"], 32.11961)
         self.assertEqual(payload["aircraft"]["lng"], 118.95847)
 
+    def test_aircraft_mission_transaction_survives_compact_cloud_state(self):
+        state = RoverTelemetry(
+            last_command="aircraft_mission_commit",
+            aircraft_transaction_stage="VERIFIED",
+            aircraft_transaction_id="a" * 64,
+            aircraft_transaction_pending=0,
+            aircraft_mission_status="execution_ready",
+        ).data()
+        state.update({
+            "aircraft_link": True,
+            "aircraft_mode": "GUIDED",
+            "aircraft_armed": False,
+            "aircraft_altitude": 5.3,
+            "aircraft_heading": 181.96,
+            "aircraft": {
+                "link_active": True,
+                "messages": [{
+                    "time": 1784963000.1,
+                    "type": "HEARTBEAT",
+                    "text": "GUIDED armed=NO",
+                }],
+            },
+        })
+
+        encoded = compact_json_bytes(state)
+        payload = json.loads(encoded)
+
+        self.assertLessEqual(len(encoded.encode("utf-8")), 480)
+        self.assertEqual(payload["aircraft_tx_stage"], "VERIFIED")
+        self.assertEqual(payload["aircraft_tx_pending"], 0)
+        self.assertEqual(payload["aircraft_mission_status"], "execution_ready")
+        self.assertEqual(payload["aircraft"]["altitude"], 5.3)
+        self.assertEqual(payload["aircraft"]["heading"], 181.96)
+
     def test_aircraft_terminal_event_updates_once_without_overwriting_rover_status(self):
         telemetry = RoverTelemetry(mission_status="rover executing")
         state = {

@@ -12,10 +12,15 @@ from shared_protocol.auth import (
 )
 from shared_protocol.frame import (
     Frame,
+    FrameDecoder,
     FrameError,
     MessageType,
     decode_frame,
     encode_frame,
+)
+from shared_protocol.mavlink_extension import (
+    unwrap_liot_frame,
+    wrap_liot_frame,
 )
 
 from .inbox import InboxRejected
@@ -79,6 +84,7 @@ class AircraftLinkServer:
         session_nonce=None,
         challenge=None,
         mavlink_sink=None,
+        plaintext=False,
     ):
         if int(max_payload) < 1:
             raise ValueError("max_payload must be positive")
@@ -96,6 +102,8 @@ class AircraftLinkServer:
         self.decoder = AuthenticatedStreamDecoder(
             max_wire_bytes=max_wire_bytes
         )
+        self.plaintext = bool(plaintext)
+        self.plain_decoder = FrameDecoder(max_payload_length=max_payload)
         self.mavlink_decoder = MavlinkStreamDecoder()
         challenge = secrets.token_bytes(32) if challenge is None else challenge
         if not isinstance(challenge, bytes) or len(challenge) != 32:
@@ -120,6 +128,8 @@ class AircraftLinkServer:
         }
 
     def challenge_datagram(self):
+        if self.plaintext:
+            return b""
         return self._seal(
             self._frame(
                 MessageType.AUTH_CHALLENGE,
@@ -129,7 +139,13 @@ class AircraftLinkServer:
         )
 
     def feed_bytes(self, data):
+        responses = []
         for packet in self.mavlink_decoder.feed(data):
+            extension = unwrap_liot_frame(packet) if self.plaintext else None
+            if extension is not None:
+                for frame in self.plain_decoder.feed(extension):
+                    responses.extend(self._handle_frame(frame))
+                continue
             is_v2 = packet[0] == 0xFD
             message_id = (
                 packet[7] | (packet[8] << 8) | (packet[9] << 16)
@@ -143,15 +159,78 @@ class AircraftLinkServer:
                 self.mavlink_sink(packet)
                 self.metrics["mavlink_chunks"] += 1
                 self.metrics["mavlink_bytes"] += len(packet)
-        before = self.decoder.rejected_size
-        envelopes = self.decoder.feed(data)
-        self.metrics["rejected_size"] += self.decoder.rejected_size - before
-        responses = []
-        for envelope in envelopes:
-            responses.extend(self._handle_envelope(envelope))
-            if len(responses) >= self.max_responses:
-                return responses[: self.max_responses]
+        if self.plaintext:
+            return responses[: self.max_responses]
+        else:
+            before = self.decoder.rejected_size
+            envelopes = self.decoder.feed(data)
+            self.metrics["rejected_size"] += self.decoder.rejected_size - before
+            for envelope in envelopes:
+                responses.extend(self._handle_envelope(envelope))
+                if len(responses) >= self.max_responses:
+                    return responses[: self.max_responses]
         return responses
+
+    def _handle_frame(self, frame, nonce=None):
+        if not self.plaintext and nonce is None:
+            return []
+        if self.plaintext:
+            nonce = None
+        self.metrics["received"] += 1
+        if frame.message_type is MessageType.AUTH_RESPONSE:
+            return []
+        if not self.plaintext:
+            if self.peer_session_nonce is None:
+                self.peer_session_nonce = nonce
+            elif nonce != self.peer_session_nonce:
+                self.peer_session_nonce = None
+                return [self.challenge_datagram()]
+        if frame.message_type not in self.optical_gate.CLOUD_COMMAND_TYPES:
+            return []
+        try:
+            self.optical_gate.require_locked(frame)
+        except OpticalBlocked:
+            return [self._wire(self.optical_gate.blocked_frame())]
+        try:
+            result = self.inbox.accept(frame)
+        except InboxRejected as exc:
+            self.metrics["rejected_queue"] += 1
+            reason = exc.reason
+            if exc.missing:
+                reason += ":" + ",".join(str(item) for item in exc.missing)
+            return [
+                self._wire(
+                    self._frame(
+                        MessageType.NACK,
+                        frame.command_id,
+                        {"acked_sequence": frame.sequence, "reason": reason[:256]},
+                    )
+                )
+            ]
+        replies = [
+            self._wire(
+                self._frame(
+                    MessageType.ACK,
+                    frame.command_id,
+                    {"acked_sequence": result.acked_sequence},
+                )
+            )
+        ]
+        if result.stage == "MISSION_STAGED":
+            replies.append(
+                self._wire(
+                    self._frame(
+                        MessageType.STATUS,
+                        frame.command_id,
+                        {
+                            "state": "MISSION_STAGED",
+                            "detail": str(frame.command_id),
+                            "timestamp": float(self.clock()),
+                        },
+                    )
+                )
+            )
+        return replies
 
     def pump_once(self, read_size=4096, snapshot=None):
         if self.stream is None:
@@ -172,12 +251,14 @@ class AircraftLinkServer:
         return len(responses)
 
     def poll_status(self, snapshot=None):
-        if self.peer_session_nonce is None:
+        if self.plaintext:
+            return []
+        if not self.plaintext and self.peer_session_nonce is None:
             return []
         frame = self.optical_gate.due_frame(
             snapshot, now=float(self.clock())
         )
-        return [] if frame is None else [self._seal(frame)]
+        return [] if frame is None else [self._wire(frame)]
 
     def poll_transaction_status(self):
         if not self.optical_gate.locked:
@@ -195,9 +276,9 @@ class AircraftLinkServer:
                 sort_keys=True,
                 separators=(",", ":"),
                 ensure_ascii=False,
-            )[:256]
+            )[:96 if self.plaintext else 256]
             responses.append(
-                self._seal(
+                self._wire(
                     self._frame(
                         MessageType.STATUS,
                         uuid.UUID(str(result["command_id"])),
@@ -221,7 +302,6 @@ class AircraftLinkServer:
             self.metrics["rejected_auth"] += 1
             self.metrics["last_auth_error"] = str(exc)[:96]
             return []
-        self.metrics["received"] += 1
         try:
             frame = decode_frame(payload, self.max_payload)
         except FrameError:
@@ -249,67 +329,9 @@ class AircraftLinkServer:
                     )
                 )
             ]
-
-        if self.peer_session_nonce is None:
-            # The envelope has already passed PSK HMAC and durable replay
-            # validation. Bind the first authenticated nonce directly so the
-            # serial Wi-Fi module does not need an extra challenge round-trip.
-            self.peer_session_nonce = nonce
-        elif nonce != self.peer_session_nonce:
-            self.peer_session_nonce = None
-            return [self.challenge_datagram()]
-
-        if frame.message_type not in self.optical_gate.CLOUD_COMMAND_TYPES:
-            return []
-        try:
-            self.optical_gate.require_locked(frame)
-        except OpticalBlocked:
-            return [self._seal(self.optical_gate.blocked_frame())]
-
-        try:
-            result = self.inbox.accept(frame)
-        except InboxRejected as exc:
-            self.metrics["rejected_queue"] += 1
-            reason = exc.reason
-            if exc.missing:
-                reason += ":" + ",".join(str(item) for item in exc.missing)
-            return [
-                self._seal(
-                    self._frame(
-                        MessageType.NACK,
-                        frame.command_id,
-                        {
-                            "acked_sequence": frame.sequence,
-                            "reason": reason[:256],
-                        },
-                    )
-                )
-            ]
-
-        replies = [
-            self._seal(
-                self._frame(
-                    MessageType.ACK,
-                    frame.command_id,
-                    {"acked_sequence": result.acked_sequence},
-                )
-            )
-        ]
-        if result.stage == "MISSION_STAGED":
-            replies.append(
-                self._seal(
-                    self._frame(
-                        MessageType.STATUS,
-                        frame.command_id,
-                        {
-                            "state": "MISSION_STAGED",
-                            "detail": str(frame.command_id),
-                            "timestamp": float(self.clock()),
-                        },
-                    )
-                )
-            )
-        return replies
+        return self._handle_frame(
+            frame, nonce=metadata["session_nonce"]
+        )
 
     def _frame(self, message_type, command_id, payload):
         frame = Frame(
@@ -324,3 +346,11 @@ class AircraftLinkServer:
 
     def _seal(self, frame):
         return self.auth.seal(encode_frame(frame, self.max_payload))
+
+    def _wire(self, frame):
+        encoded = encode_frame(frame, self.max_payload)
+        return (
+            wrap_liot_frame(encoded)
+            if self.plaintext
+            else self.auth.seal(encoded)
+        )
