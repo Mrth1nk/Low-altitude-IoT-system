@@ -36,8 +36,20 @@ test("builds one complete rover mission with speed commands and no fabricated ho
     [0.8, 1.2],
   );
   assert.deepEqual(
+    command.payload.items.filter((item) => item.command === 178).map((item) => item.frame),
+    [0, 0],
+  );
+  assert.deepEqual(
     command.payload.items.filter((item) => item.command === 16).map((item) => [item.lat, item.lon]),
     [[32.1197, 118.9531], [32.1198, 118.9533]],
+  );
+  assert.deepEqual(
+    command.payload.items.filter((item) => item.command === 16).map((item) => item.frame),
+    [0, 0],
+  );
+  assert.deepEqual(
+    command.payload.items.filter((item) => item.command === 16).map((item) => item.alt),
+    [0, 0],
   );
   assert.equal(command.payload.items.some((item) => item.is_home), false);
 });

@@ -12,6 +12,7 @@ from typing import Any, Iterable
 
 MAV_MISSION_ACCEPTED = 0
 MAV_CMD_NAV_WAYPOINT = 16
+MAV_CMD_DO_CHANGE_SPEED = 178
 MAV_FRAME_GLOBAL = 0
 MAV_FRAME_GLOBAL_RELATIVE_ALT_INT = 6
 MAV_MISSION_TYPE_MISSION = 0
@@ -605,11 +606,12 @@ class RoverMissionManager:
                 )
             if wanted.seq == 0:
                 continue
-            if (
+            position_mismatch = (
                 abs(wanted.x - received.x) > self.coordinate_tolerance
                 or abs(wanted.y - received.y) > self.coordinate_tolerance
                 or abs(wanted.z - received.z) > self.altitude_tolerance
-            ):
+            )
+            if position_mismatch and wanted.command != MAV_CMD_DO_CHANGE_SPEED:
                 raise MissionVerificationError(
                     f"readback mismatch seq {wanted.seq}: position"
                 )

@@ -23,6 +23,7 @@
   const MAV_CMD_NAV_WAYPOINT = 16;
   const MAV_CMD_DO_CHANGE_SPEED = 178;
   const MAV_FRAME_MISSION = 2;
+  const MAV_FRAME_GLOBAL = 0;
   const MAV_FRAME_GLOBAL_RELATIVE_ALT_INT = 6;
 
   function objectValue(value) {
@@ -271,11 +272,17 @@
         }
         items.push(commonMissionItem({lat: 0.000001, lon: 0.000001}, {
           command: MAV_CMD_DO_CHANGE_SPEED,
-          frame: MAV_FRAME_MISSION,
+          frame: MAV_FRAME_GLOBAL,
           param1: 1,
           param2: speed,
         }));
-        items.push(commonMissionItem(points[index]));
+        // ArduPilot Rover stores ground waypoints as GLOBAL (0). Relative
+        // altitude frame 6 is for the aircraft path and is rewritten by
+        // Rover during readback, which makes verification fail.
+        items.push(commonMissionItem(points[index], {
+          frame: MAV_FRAME_GLOBAL,
+          alt: 0,
+        }));
       }
     } else {
       const altitude = Number(options.altitude);
