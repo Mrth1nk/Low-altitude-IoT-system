@@ -103,7 +103,17 @@
             : [],
         };
     if (opticalBlocked(telemetry)) {
-      return {blocked: true, status: "OPTICAL LINK BLOCKED", messages: []};
+      const blockedAt = Number(telemetry.aircraft_msg_time) || receivedAt;
+      return {
+        blocked: true,
+        status: "OPTICAL LINK BLOCKED",
+        messages: [{
+          time: blockedAt,
+          type: "OPTICAL",
+          text: "BLOCKED",
+          key: `optical-blocked-${blockedAt}`,
+        }],
+      };
     }
     return {
       ...source,

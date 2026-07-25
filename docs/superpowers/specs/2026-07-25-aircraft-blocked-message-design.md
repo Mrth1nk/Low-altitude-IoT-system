@@ -9,7 +9,7 @@ aircraft, MAVLink, mission, or Tuya transport behavior.
 
 - Render an optical-link interruption in the existing aircraft message list.
 - Use the same row layout as HEARTBEAT messages: timestamp, type, and text.
-- Display `OPTICAL` as the type and `OPTICAL LINK BLOCKED` as the text.
+- Display `OPTICAL` as the type and `BLOCKED` as the text.
 - Prefer the aircraft message timestamp; fall back to the cloud state receipt
   timestamp only when no message timestamp is available.
 - Preserve prior aircraft messages while blocked and continue appending

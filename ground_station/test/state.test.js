@@ -79,11 +79,14 @@ test("blocked optical state clears aircraft detail and rejects every aircraft co
     },
   ], 1710000000000);
 
-  assert.deepEqual(state.aircraft, {
-    blocked: true,
-    status: "OPTICAL LINK BLOCKED",
-    messages: [],
-  });
+  assert.equal(state.aircraft.blocked, true);
+  assert.equal(state.aircraft.status, "OPTICAL LINK BLOCKED");
+  assert.deepEqual(state.aircraft.messages, [{
+    time: 1710000000,
+    type: "OPTICAL",
+    text: "BLOCKED",
+    key: "optical-blocked-1710000000",
+  }]);
   assert.equal(aircraftCommandsAllowed(state), false);
 });
 
@@ -101,7 +104,12 @@ test("legacy compact aircraft interruption state is treated as optical blocked",
   ], 1710000001000);
 
   assert.equal(state.optical.blocked, true);
-  assert.deepEqual(state.aircraft.messages, []);
+  assert.deepEqual(state.aircraft.messages, [{
+    time: 1710000000,
+    type: "OPTICAL",
+    text: "BLOCKED",
+    key: "optical-blocked-1710000000",
+  }]);
   assert.equal(aircraftCommandsAllowed(state), false);
 });
 

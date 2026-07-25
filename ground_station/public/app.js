@@ -158,9 +158,13 @@ function renderState(state) {
   updateMissionButton();
   if (blocked) {
     els.aircraftGrid.innerHTML = "";
-    els.aircraftMessages.innerHTML =
-      '<div class="aircraft-message blocked-message">OPTICAL LINK BLOCKED</div>';
-    messageHistory.length = 0;
+    const merged = Core.appendAircraftMessages(
+      messageHistory,
+      aircraft.messages,
+      state.cloud_received_at,
+    );
+    messageHistory.splice(0, messageHistory.length, ...merged);
+    renderMessages();
   } else {
     renderMetrics(els.aircraftGrid, aircraftDetails(aircraft));
     const heartbeatMessages = aircraft.messages
