@@ -18,6 +18,55 @@ from .optical_state import OpticalStateMachine
 from .precision_landing import send_landing_target
 
 
+MAV_TYPE_GCS = 6
+MAV_AUTOPILOT_INVALID = 8
+MAV_CMD_SET_MESSAGE_INTERVAL = 511
+VISION_MESSAGE_IDS = (33, 132, 32)  # GLOBAL_POSITION_INT, DISTANCE_SENSOR, LOCAL_POSITION_NED
+
+
+def is_autopilot_heartbeat(message):
+    return (
+        message is not None
+        and message.get_type() == "HEARTBEAT"
+        and int(getattr(message, "type", MAV_TYPE_GCS)) != MAV_TYPE_GCS
+        and int(getattr(message, "autopilot", MAV_AUTOPILOT_INVALID))
+        != MAV_AUTOPILOT_INVALID
+    )
+
+
+def wait_for_autopilot_heartbeat(master, timeout=10.0):
+    deadline = time.monotonic() + float(timeout)
+    while time.monotonic() < deadline:
+        message = master.recv_match(
+            type="HEARTBEAT",
+            blocking=True,
+            timeout=min(1.0, max(0.0, deadline - time.monotonic())),
+        )
+        if not is_autopilot_heartbeat(message):
+            continue
+        master.target_system = message.get_srcSystem()
+        master.target_component = message.get_srcComponent()
+        return message
+    raise TimeoutError("flight-controller heartbeat unavailable on vision UART")
+
+
+def request_vision_messages(master, interval_us=100_000):
+    for message_id in VISION_MESSAGE_IDS:
+        master.mav.command_long_send(
+            master.target_system or 1,
+            master.target_component or 1,
+            MAV_CMD_SET_MESSAGE_INTERVAL,
+            0,
+            message_id,
+            int(interval_us),
+            0,
+            0,
+            0,
+            0,
+            0,
+        )
+
+
 def reopen_camera(capture_factory, camera_device, previous=None):
     if previous is not None:
         previous.release()
@@ -90,6 +139,7 @@ class OpticalStatePublisher:
         mode,
         timestamp,
         last_error,
+        **diagnostics,
     ):
         self.store.save(
             {
@@ -100,6 +150,7 @@ class OpticalStatePublisher:
                 "mode": str(mode),
                 "timestamp": float(timestamp),
                 "last_error": str(last_error or "")[:256],
+                **diagnostics,
             }
         )
 
@@ -139,7 +190,8 @@ def run():
         autoreconnect=False,
         source_system=254,
     )
-    master.wait_heartbeat(timeout=10)
+    wait_for_autopilot_heartbeat(master, timeout=10)
+    request_vision_messages(master)
     camera = reopen_camera(cv2.VideoCapture, camera_device)
     if camera is None:
         raise RuntimeError(f"camera unavailable: {camera_device}")
@@ -186,6 +238,9 @@ def run():
     mode = "UNKNOWN"
     altitude_m = 0.0
     altitude_source = "unknown"
+    guided_tx_count = 0
+    landing_tx_count = 0
+    last_control = None
 
     def request_stop(_signum, _frame):
         stop.set()
@@ -197,12 +252,15 @@ def run():
             message = master.recv_match(blocking=False)
             while message is not None:
                 kind = message.get_type()
-                if kind == "HEARTBEAT":
+                if kind == "HEARTBEAT" and is_autopilot_heartbeat(message):
                     mode = mavutil.mode_string_v10(message)
                 elif kind == "DISTANCE_SENSOR" and int(message.current) > 0:
                     altitude_m = float(message.current) / 100.0
                     altitude_source = "rangefinder"
-                elif kind == "GLOBAL_POSITION_INT" and altitude_source == "unknown":
+                elif (
+                    kind == "GLOBAL_POSITION_INT"
+                    and altitude_source != "rangefinder"
+                ):
                     altitude_m = max(0.0, float(message.relative_alt) / 1000.0)
                     altitude_source = "relative_altitude"
                 message = master.recv_match(blocking=False)
@@ -250,8 +308,22 @@ def run():
             )
             if output.correction is not None:
                 _send_guided_velocity(master, output.correction)
+                guided_tx_count += 1
+                last_control = {
+                    "kind": "guided_velocity",
+                    "forward_mps": output.correction.forward_mps,
+                    "right_mps": output.correction.right_mps,
+                    "timestamp": wall_timestamp,
+                }
             if output.landing_target is not None:
                 send_landing_target(master.mav, output.landing_target)
+                landing_tx_count += 1
+                last_control = {
+                    "kind": "landing_target",
+                    "angle_x": output.landing_target.angle_x,
+                    "angle_y": output.landing_target.angle_y,
+                    "timestamp": wall_timestamp,
+                }
 
             preview_frame = frame.copy()
             optical = output.optical
@@ -279,6 +351,11 @@ def run():
                 mode=mode,
                 timestamp=wall_timestamp,
                 last_error="" if output.optical.locked else "optical_blocked",
+                altitude_m=altitude_m,
+                altitude_source=altitude_source,
+                guided_tx_count=guided_tx_count,
+                landing_tx_count=landing_tx_count,
+                last_control=last_control,
             )
     finally:
         publisher.publish(
