@@ -1,5 +1,30 @@
 # CHANGELOG.md
 
+## 2026-07-26
+
+- Restored aircraft GUIDED infrared tracking to the proven reference control
+  semantics:
+  - pixel-normalized image error;
+  - 25 px deadzone;
+  - forward sign matching the successful `precision_land_v4` behavior;
+  - 0.35 m/s bounded output at 10 Hz;
+  - no dependence on a valid altitude source.
+- Restored indoor-safe angle-only precision landing behavior:
+  - emits BODY_FRD `LANDING_TARGET` with `position_valid=0`;
+  - continues to work when altitude is unavailable;
+  - applies the configured 4 cm forward and 1 cm right camera offsets when
+    altitude is valid.
+- Configured every camera open/reopen to 640x480 with a one-frame buffer.
+- Added optical diagnostics for frame size, target coordinates, pixel error,
+  and actual GUIDED/LAND transmission counters.
+- Deployed only the vision package to ELF with a reversible backup under
+  `/home/elf/vision-backups/20260726-034508`; no board reboot was performed.
+- Verified disarmed mode transitions and live transmissions:
+  `GUIDED` emitted 21 velocity messages, `LAND` emitted 21 landing targets,
+  then the aircraft was restored to `STABILIZE`.
+- Full repository verification passed: 242 Python tests, 1 expected OpenCV
+  skip, compile checks, and `git diff --check`.
+
 ## 2026-07-24
 
 - Started the reliable dual-vehicle refactor on

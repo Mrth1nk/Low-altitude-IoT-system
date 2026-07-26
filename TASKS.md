@@ -1,5 +1,25 @@
 # TASKS.md
 
+## 2026-07-26 Vision Recovery
+
+### Completed
+
+- Reproduced the failure against the successful aircraft reference scripts.
+- Confirmed camera detection and UART9 MAVLink TX/RX independently.
+- Replaced altitude-dependent GUIDED control with the successful pixel-based
+  forward/right correction semantics.
+- Restored angle-only BODY_FRD precision-landing output for unknown altitude.
+- Fixed camera reopen configuration and added live optical diagnostics.
+- Deployed and backed up the ELF vision package without rebooting the board.
+- Verified disarmed `GUIDED` and `LAND` transmissions, then restored
+  `STABILIZE`.
+
+### Remaining
+
+1. Perform the supervised propeller-off visual alignment check with the real
+   aircraft geometry.
+2. Perform the outdoor powered flight and final landing rehearsal.
+
 ## 2026-07-24 Refactor Status
 
 ### Completed

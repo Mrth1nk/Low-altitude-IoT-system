@@ -12,12 +12,17 @@ class FakeCapture:
     def __init__(self, opened=True):
         self.opened = opened
         self.released = False
+        self.properties = []
 
     def isOpened(self):
         return self.opened
 
     def release(self):
         self.released = True
+
+    def set(self, property_id, value):
+        self.properties.append((property_id, value))
+        return True
 
 
 class CameraRecoveryTests(unittest.TestCase):
@@ -43,6 +48,22 @@ class CameraRecoveryTests(unittest.TestCase):
 
         self.assertIsNone(result)
         self.assertTrue(replacement.released)
+
+    def test_opened_camera_uses_reference_resolution_and_single_frame_buffer(self):
+        replacement = FakeCapture()
+
+        result = reopen_camera(
+            lambda _device: replacement,
+            "/dev/video0",
+            width=640,
+            height=480,
+        )
+
+        self.assertIs(result, replacement)
+        self.assertEqual(
+            replacement.properties,
+            [(3, 640), (4, 480), (38, 1)],
+        )
 
 
 class FakeMessage:

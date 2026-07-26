@@ -74,6 +74,29 @@ class VisionModeControllerTests(unittest.TestCase):
         self.assertIsNone(result.correction)
         self.assertIsNone(result.requested_mode)
 
+    def test_guided_pixel_control_does_not_require_altitude(self):
+        self.controller.process(
+            bright_frame(),
+            mode="GUIDED",
+            altitude_m=0.0,
+            altitude_source="unknown",
+            timestamp=3.0,
+            now=3.0,
+        )
+        result = self.controller.process(
+            bright_frame(),
+            mode="GUIDED",
+            altitude_m=0.0,
+            altitude_source="unknown",
+            timestamp=3.1,
+            now=3.1,
+        )
+
+        self.assertTrue(result.optical.locked)
+        self.assertIsNotNone(result.correction)
+        self.assertLess(result.correction.forward_mps, 0.0)
+        self.assertGreater(result.correction.right_mps, 0.0)
+
 
 if __name__ == "__main__":
     unittest.main()

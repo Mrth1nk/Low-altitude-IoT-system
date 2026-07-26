@@ -94,6 +94,31 @@ class GuidedTrackerTests(unittest.TestCase):
         self.assertAlmostEqual(second.forward_mps, 0.1, places=6)
         self.assertAlmostEqual(second.right_mps, 0.1, places=6)
 
+    def test_successful_reference_pixel_control_has_matching_sign_and_scale(self):
+        tracker = GuidedTracker(
+            TrackerConfig(
+                pixel_deadzone=25.0,
+                pixel_gain_forward=0.6,
+                pixel_gain_right=0.6,
+                pixel_max_speed_mps=0.35,
+                pixel_send_hz=10.0,
+            )
+        )
+
+        correction = tracker.update_pixels(
+            center_x=350.0,
+            center_y=210.0,
+            frame_width=640,
+            frame_height=480,
+            mode="GUIDED",
+            frame_timestamp=1.0,
+            now=1.0,
+        )
+
+        self.assertIsNotNone(correction)
+        self.assertAlmostEqual(correction.forward_mps, -0.075, places=6)
+        self.assertAlmostEqual(correction.right_mps, 0.05625, places=6)
+
 
 if __name__ == "__main__":
     unittest.main()

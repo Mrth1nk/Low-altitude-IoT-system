@@ -53,6 +53,11 @@ class TrackerConfig:
     max_speed_mps: float = 0.6
     max_accel_mps2: float = 0.8
     stale_after_s: float = 0.20
+    pixel_deadzone: float = 25.0
+    pixel_gain_forward: float = 0.6
+    pixel_gain_right: float = 0.6
+    pixel_max_speed_mps: float = 0.35
+    pixel_send_hz: float = 10.0
 
     def __post_init__(self):
         if not 0 < self.low_pass_alpha <= 1:
@@ -62,8 +67,12 @@ class TrackerConfig:
             self.max_speed_mps,
             self.max_accel_mps2,
             self.stale_after_s,
+            self.pixel_deadzone,
+            self.pixel_max_speed_mps,
         ) < 0:
             raise ValueError("tracker limits must be non-negative")
+        if self.pixel_send_hz <= 0:
+            raise ValueError("pixel_send_hz must be positive")
 
 
 @dataclass(frozen=True)

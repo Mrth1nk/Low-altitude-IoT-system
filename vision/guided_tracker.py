@@ -22,6 +22,7 @@ class GuidedTracker:
         self._filtered: Optional[BodyOffset] = None
         self._last_velocity = BodyOffset(0.0, 0.0)
         self._last_update: Optional[float] = None
+        self._last_pixel_emit: Optional[float] = None
 
     def update(
         self,
@@ -59,10 +60,57 @@ class GuidedTracker:
         self._last_update = float(now)
         return Correction(forward, right, 0.0, "BODY_NED", float(now))
 
+    def update_pixels(
+        self,
+        *,
+        center_x: Optional[float],
+        center_y: Optional[float],
+        frame_width: int,
+        frame_height: int,
+        mode: str,
+        frame_timestamp: Optional[float],
+        now: float,
+    ) -> Optional[Correction]:
+        if (
+            str(mode).strip().upper() != "GUIDED"
+            or center_x is None
+            or center_y is None
+            or frame_timestamp is None
+            or now - frame_timestamp > self.config.stale_after_s
+            or frame_width <= 0
+            or frame_height <= 0
+        ):
+            self.reset()
+            return None
+
+        if (
+            self._last_pixel_emit is not None
+            and now - self._last_pixel_emit < 1.0 / self.config.pixel_send_hz
+        ):
+            return None
+
+        error_x = float(center_x) - float(frame_width) / 2.0
+        error_y = float(center_y) - float(frame_height) / 2.0
+        normalized_x = error_x / (float(frame_width) / 2.0)
+        normalized_y = error_y / (float(frame_height) / 2.0)
+        forward = self._pixel_axis(
+            error_y,
+            normalized_y,
+            self.config.pixel_gain_forward,
+        )
+        right = self._pixel_axis(
+            error_x,
+            normalized_x,
+            self.config.pixel_gain_right,
+        )
+        self._last_pixel_emit = float(now)
+        return Correction(forward, right, 0.0, "BODY_NED", float(now))
+
     def reset(self) -> None:
         self._filtered = None
         self._last_velocity = BodyOffset(0.0, 0.0)
         self._last_update = None
+        self._last_pixel_emit = None
 
     def _low_pass(self, offset: BodyOffset) -> BodyOffset:
         if self._filtered is None:
@@ -85,3 +133,17 @@ class GuidedTracker:
     def _accel_limit(self, previous: float, target: float, dt: float) -> float:
         max_delta = self.config.max_accel_mps2 * dt
         return max(previous - max_delta, min(previous + max_delta, target))
+
+    def _pixel_axis(
+        self,
+        error_pixels: float,
+        normalized_error: float,
+        gain: float,
+    ) -> float:
+        if abs(error_pixels) <= self.config.pixel_deadzone:
+            return 0.0
+        value = gain * normalized_error
+        return max(
+            -self.config.pixel_max_speed_mps,
+            min(self.config.pixel_max_speed_mps, value),
+        )

@@ -67,11 +67,21 @@ def request_vision_messages(master, interval_us=100_000):
         )
 
 
-def reopen_camera(capture_factory, camera_device, previous=None):
+def reopen_camera(
+    capture_factory,
+    camera_device,
+    previous=None,
+    *,
+    width=640,
+    height=480,
+):
     if previous is not None:
         previous.release()
     camera = capture_factory(camera_device)
     if camera.isOpened():
+        camera.set(3, int(width))
+        camera.set(4, int(height))
+        camera.set(38, 1)
         return camera
     camera.release()
     return None
@@ -220,16 +230,28 @@ def run():
         max_speed_mps=float(os.environ.get("TRACKER_MAX_SPEED_MPS", "0.6")),
         max_accel_mps2=float(os.environ.get("TRACKER_MAX_ACCEL_MPS2", "0.8")),
         stale_after_s=float(os.environ.get("TRACKER_STALE_AFTER_S", "0.20")),
+        pixel_deadzone=float(os.environ.get("TRACKER_PIXEL_DEADZONE", "25")),
+        pixel_gain_forward=float(
+            os.environ.get("TRACKER_PIXEL_GAIN_FORWARD", "0.6")
+        ),
+        pixel_gain_right=float(
+            os.environ.get("TRACKER_PIXEL_GAIN_RIGHT", "0.6")
+        ),
+        pixel_max_speed_mps=float(
+            os.environ.get("TRACKER_PIXEL_MAX_SPEED_MPS", "0.35")
+        ),
+        pixel_send_hz=float(os.environ.get("TRACKER_PIXEL_SEND_HZ", "10")),
     )
     optical_config = OpticalConfig(
         acquire_count=int(os.environ.get("OPTICAL_ACQUIRE_COUNT", "3")),
         loss_count=int(os.environ.get("OPTICAL_LOSS_COUNT", "1")),
     )
+    camera_config = CameraConfig()
     controller = VisionModeController(
         detector=BrightSpotDetector(detector_config),
         tracker=GuidedTracker(tracker_config),
         optical=OpticalStateMachine(optical_config),
-        camera=CameraConfig(),
+        camera=camera_config,
     )
     publisher = OpticalStatePublisher(
         AtomicJsonStore(runtime_dir / "optical-state.json", max_bytes=64 * 1024)
@@ -356,6 +378,28 @@ def run():
                 guided_tx_count=guided_tx_count,
                 landing_tx_count=landing_tx_count,
                 last_control=last_control,
+                frame_width=int(gray.shape[1]),
+                frame_height=int(gray.shape[0]),
+                target_x=(
+                    output.detection.center_x
+                    if output.detection is not None
+                    else None
+                ),
+                target_y=(
+                    output.detection.center_y
+                    if output.detection is not None
+                    else None
+                ),
+                pixel_error_x=(
+                    output.detection.center_x - float(gray.shape[1]) / 2.0
+                    if output.detection is not None
+                    else None
+                ),
+                pixel_error_y=(
+                    output.detection.center_y - float(gray.shape[0]) / 2.0
+                    if output.detection is not None
+                    else None
+                ),
             )
     finally:
         publisher.publish(

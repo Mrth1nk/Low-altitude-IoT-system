@@ -5,7 +5,7 @@ import math
 from typing import Optional, Tuple
 
 from .detector import Detection
-from .geometry import BodyOffset
+from .geometry import BodyAngles, BodyOffset
 
 
 MAV_FRAME_BODY_FRD = 12
@@ -100,19 +100,26 @@ class PrecisionLandingController:
         altitude_source: str,
         frame_timestamp: Optional[float],
         now: float,
+        angles: Optional[BodyAngles] = None,
+        distance_m: Optional[float] = None,
     ) -> Optional[LandingTarget]:
         if mode.strip().upper() not in LANDING_MODES:
             self.reset()
             return None
 
         valid = (
-            offset is not None
-            and detection is not None
+            detection is not None
             and frame_timestamp is not None
             and 0.0 <= now - frame_timestamp <= self.config.stale_after_s
-            and altitude_m >= self.config.min_altitude_m
-            and bool(altitude_source.strip())
-            and altitude_source.strip().lower() != "unknown"
+            and (
+                angles is not None
+                or (
+                    offset is not None
+                    and altitude_m >= self.config.min_altitude_m
+                    and bool(altitude_source.strip())
+                    and altitude_source.strip().lower() != "unknown"
+                )
+            )
         )
         if not valid:
             self._record_loss(altitude_source=altitude_source)
@@ -123,9 +130,17 @@ class PrecisionLandingController:
         if self._acquire_count >= self.config.acquire_count:
             self._acquired = True
 
-        angle_x = math.atan2(offset.right_m, altitude_m)
-        angle_y = math.atan2(-offset.forward_m, altitude_m)
-        horizontal_error = math.hypot(offset.forward_m, offset.right_m)
+        if angles is None:
+            angle_x = math.atan2(offset.right_m, altitude_m)
+            angle_y = math.atan2(-offset.forward_m, altitude_m)
+        else:
+            angle_x = angles.angle_x
+            angle_y = angles.angle_y
+        horizontal_error = (
+            math.hypot(offset.forward_m, offset.right_m)
+            if offset is not None
+            else 0.0
+        )
         frequency_hz = 0.0
         if self._last_emit is not None:
             elapsed = now - self._last_emit
@@ -160,7 +175,11 @@ class PrecisionLandingController:
             frame=MAV_FRAME_BODY_FRD,
             angle_x=angle_x,
             angle_y=angle_y,
-            distance=math.sqrt(altitude_m**2 + horizontal_error**2),
+            distance=(
+                float(distance_m)
+                if distance_m is not None
+                else math.sqrt(altitude_m**2 + horizontal_error**2)
+            ),
             position_valid=0,
             x=0.0,
             y=0.0,

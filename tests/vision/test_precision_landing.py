@@ -275,6 +275,42 @@ class PrecisionLandingTests(unittest.TestCase):
         self.assertIsNotNone(guided.correction)
         self.assertIsNone(guided.landing_target)
 
+    def test_mode_controller_land_emits_image_angles_without_altitude(self):
+        detector = BrightSpotDetector(
+            DetectorConfig(
+                threshold=220,
+                min_area=8,
+                min_brightness=180,
+                min_circularity=0.2,
+                blur_size=0,
+                morph_kernel=0,
+            )
+        )
+        controller = VisionModeController(
+            detector=detector,
+            tracker=GuidedTracker(TrackerConfig()),
+            optical=OpticalStateMachine(
+                OpticalConfig(acquire_count=1, loss_count=1)
+            ),
+            camera=CameraConfig(),
+            precision_landing=self.make_controller(acquire_count=1),
+        )
+
+        result = controller.process(
+            bright_frame(),
+            mode="LAND",
+            altitude_m=0.0,
+            altitude_source="unknown",
+            timestamp=3.0,
+            now=3.0,
+        )
+
+        self.assertIsNotNone(result.landing_target)
+        self.assertEqual(result.landing_target.position_valid, 0)
+        self.assertGreater(result.landing_target.angle_x, 0.0)
+        self.assertLess(result.landing_target.angle_y, 0.0)
+        self.assertEqual(result.landing_target.distance, 0.0)
+
 
 if __name__ == "__main__":
     unittest.main()
