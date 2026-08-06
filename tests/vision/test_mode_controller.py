@@ -7,6 +7,10 @@ from vision.detector import BrightSpotDetector
 from vision.guided_tracker import GuidedTracker
 from vision.mode_controller import VisionModeController
 from vision.optical_state import OpticalStateMachine
+from vision.precision_landing import (
+    PrecisionLandingConfig,
+    PrecisionLandingController,
+)
 
 
 def bright_frame():
@@ -40,6 +44,20 @@ class VisionModeControllerTests(unittest.TestCase):
             tracker=GuidedTracker(TrackerConfig()),
             optical=OpticalStateMachine(OpticalConfig(acquire_count=2, loss_count=1)),
             camera=CameraConfig(),
+        )
+
+    def make_final_descent_controller(self):
+        return VisionModeController(
+            detector=self.controller.detector,
+            tracker=GuidedTracker(TrackerConfig()),
+            optical=OpticalStateMachine(
+                OpticalConfig(acquire_count=1, loss_count=1)
+            ),
+            camera=CameraConfig(),
+            precision_landing=PrecisionLandingController(
+                PrecisionLandingConfig(acquire_count=1)
+            ),
+            final_descent_altitude_m=0.25,
         )
 
     def test_acquire_count_then_guided_correction_and_immediate_loss_block(self):
@@ -128,6 +146,90 @@ class VisionModeControllerTests(unittest.TestCase):
 
         self.assertGreater(result.correction.forward_mps, 0.0)
         self.assertGreater(result.correction.right_mps, 0.0)
+
+    def test_land_stops_precision_targets_at_25_cm_and_latches(self):
+        controller = self.make_final_descent_controller()
+
+        above = controller.process(
+            bright_frame(),
+            mode="LAND",
+            altitude_m=0.26,
+            altitude_source="relative_altitude",
+            timestamp=5.0,
+            now=5.0,
+        )
+        cutoff = controller.process(
+            bright_frame(),
+            mode="LAND",
+            altitude_m=0.25,
+            altitude_source="relative_altitude",
+            timestamp=5.1,
+            now=5.1,
+        )
+        noisy_rise = controller.process(
+            bright_frame(),
+            mode="LAND",
+            altitude_m=0.29,
+            altitude_source="relative_altitude",
+            timestamp=5.2,
+            now=5.2,
+        )
+
+        self.assertIsNotNone(above.landing_target)
+        self.assertFalse(above.final_descent_active)
+        self.assertIsNone(cutoff.landing_target)
+        self.assertTrue(cutoff.final_descent_active)
+        self.assertIsNone(noisy_rise.landing_target)
+        self.assertTrue(noisy_rise.final_descent_active)
+
+    def test_zero_or_unknown_altitude_does_not_start_final_descent(self):
+        controller = self.make_final_descent_controller()
+
+        result = controller.process(
+            bright_frame(),
+            mode="LAND",
+            altitude_m=0.0,
+            altitude_source="unknown",
+            timestamp=6.0,
+            now=6.0,
+        )
+
+        self.assertFalse(result.final_descent_active)
+        self.assertIsNotNone(result.landing_target)
+
+    def test_leaving_land_resets_latch_and_guided_tracking_is_unchanged(self):
+        controller = self.make_final_descent_controller()
+        controller.process(
+            bright_frame(),
+            mode="LAND",
+            altitude_m=0.20,
+            altitude_source="relative_altitude",
+            timestamp=7.0,
+            now=7.0,
+        )
+
+        guided = controller.process(
+            bright_frame(),
+            mode="GUIDED",
+            altitude_m=0.20,
+            altitude_source="relative_altitude",
+            timestamp=7.1,
+            now=7.1,
+        )
+        land_again = controller.process(
+            bright_frame(),
+            mode="LAND",
+            altitude_m=0.30,
+            altitude_source="relative_altitude",
+            timestamp=7.2,
+            now=7.2,
+        )
+
+        self.assertFalse(guided.final_descent_active)
+        self.assertIsNotNone(guided.correction)
+        self.assertIsNotNone(guided.landing_target)
+        self.assertFalse(land_again.final_descent_active)
+        self.assertIsNotNone(land_again.landing_target)
 
 
 if __name__ == "__main__":

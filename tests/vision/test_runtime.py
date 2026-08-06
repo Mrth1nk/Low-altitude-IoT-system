@@ -2,9 +2,11 @@ import unittest
 
 from vision.runtime import (
     OpticalStatePublisher,
+    build_preview_label,
     camera_candidates,
     is_autopilot_heartbeat,
     make_camera_capture,
+    parse_final_descent_altitude,
     reopen_camera,
     request_vision_messages,
     send_target_status_text,
@@ -224,6 +226,39 @@ class RuntimeDiagnosticsTests(unittest.TestCase):
         self.assertEqual(store.value["altitude_m"], 2.0)
         self.assertEqual(store.value["altitude_source"], "rangefinder")
         self.assertEqual(store.value["guided_tx_count"], 3)
+
+    def test_final_descent_configuration_and_overlay(self):
+        self.assertEqual(parse_final_descent_altitude("0.25"), 0.25)
+        with self.assertRaises(ValueError):
+            parse_final_descent_altitude("0")
+
+        label = build_preview_label(
+            mode="LAND",
+            locked=True,
+            confidence=0.91,
+            area=12000,
+            final_descent_active=True,
+        )
+
+        self.assertIn("FINAL DESCENT", label)
+        self.assertIn("LAND", label)
+
+    def test_final_descent_diagnostics_are_published(self):
+        store = FakeStore()
+
+        OpticalStatePublisher(store).publish(
+            locked=True,
+            confidence=0.9,
+            area=12000,
+            mode="LAND",
+            timestamp=2.0,
+            last_error="",
+            final_descent_active=True,
+            final_descent_altitude_m=0.25,
+        )
+
+        self.assertTrue(store.value["final_descent_active"])
+        self.assertEqual(store.value["final_descent_altitude_m"], 0.25)
 
 
 if __name__ == "__main__":

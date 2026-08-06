@@ -26,6 +26,24 @@ MAV_SEVERITY_NOTICE = 5
 VISION_MESSAGE_IDS = (33, 132, 32)  # GLOBAL_POSITION_INT, DISTANCE_SENSOR, LOCAL_POSITION_NED
 
 
+def parse_final_descent_altitude(value: str) -> float:
+    altitude_m = float(value)
+    if altitude_m <= 0:
+        raise ValueError("PLND_FINAL_DESCENT_ALT_M must be positive")
+    return altitude_m
+
+
+def build_preview_label(
+    *, mode, locked, confidence, area, final_descent_active=False
+):
+    state = "LOCKED" if locked else "BLOCKED"
+    final_state = "  FINAL DESCENT" if final_descent_active else ""
+    return (
+        f"{mode}  {state}{final_state}  "
+        f"conf={float(confidence):.2f} area={float(area):.0f}"
+    )
+
+
 def is_autopilot_heartbeat(message):
     return (
         message is not None
@@ -291,11 +309,15 @@ def run():
         loss_count=int(os.environ.get("OPTICAL_LOSS_COUNT", "1")),
     )
     camera_config = CameraConfig()
+    final_descent_altitude_m = parse_final_descent_altitude(
+        os.environ.get("PLND_FINAL_DESCENT_ALT_M", "0.25")
+    )
     controller = VisionModeController(
         detector=BrightSpotDetector(detector_config),
         tracker=GuidedTracker(tracker_config),
         optical=OpticalStateMachine(optical_config),
         camera=camera_config,
+        final_descent_altitude_m=final_descent_altitude_m,
     )
     publisher = OpticalStatePublisher(
         AtomicJsonStore(runtime_dir / "optical-state.json", max_bytes=64 * 1024)
@@ -429,10 +451,12 @@ def run():
 
             preview_frame = frame.copy()
             optical = output.optical
-            label = (
-                f"{mode}  "
-                f"{'LOCKED' if optical.locked else 'BLOCKED'}  "
-                f"conf={optical.confidence:.2f} area={optical.area:.0f}"
+            label = build_preview_label(
+                mode=mode,
+                locked=optical.locked,
+                confidence=optical.confidence,
+                area=optical.area,
+                final_descent_active=output.final_descent_active,
             )
             cv2.rectangle(preview_frame, (8, 8), (min(780, 16 + len(label) * 12), 42), (0, 0, 0), -1)
             cv2.putText(
@@ -459,6 +483,8 @@ def run():
                 altitude_source=altitude_source,
                 guided_tx_count=guided_tx_count,
                 landing_tx_count=landing_tx_count,
+                final_descent_active=output.final_descent_active,
+                final_descent_altitude_m=final_descent_altitude_m,
                 status_text_tx_count=status_text_tx_count,
                 last_status_text=last_status_text,
                 last_control=last_control,

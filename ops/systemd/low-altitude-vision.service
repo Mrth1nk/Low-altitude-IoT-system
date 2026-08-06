@@ -12,6 +12,7 @@ SupplementaryGroups=dialout video
 WorkingDirectory=/opt/low-altitude-iot/current
 EnvironmentFile=/etc/low-altitude-iot/aircraft.env
 Environment=AIRCRAFT_RUNTIME_DIR=/run/low-altitude-iot
+Environment=PLND_FINAL_DESCENT_ALT_M=0.25
 ExecStartPre=/usr/local/lib/low-altitude-iot/check_serial_roles.sh vision
 ExecStart=/usr/bin/python3 -m vision.runtime
 Restart=on-failure

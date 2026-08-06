@@ -11,6 +11,7 @@ from .geometry import detection_to_body_angles, detection_to_body_offset
 from .guided_tracker import Correction, GuidedTracker
 from .optical_state import OpticalSnapshot, OpticalStateMachine
 from .precision_landing import (
+    LANDING_MODES,
     LandingTarget,
     PrecisionLandingConfig,
     PrecisionLandingController,
@@ -24,6 +25,7 @@ class ControllerOutput:
     correction: Optional[Correction]
     rc_takeover: bool
     landing_target: Optional[LandingTarget] = None
+    final_descent_active: bool = False
     requested_mode: None = None
 
 
@@ -36,14 +38,23 @@ class VisionModeController:
         optical: OpticalStateMachine,
         camera: CameraConfig,
         precision_landing: Optional[PrecisionLandingController] = None,
+        final_descent_altitude_m: float = 0.25,
     ):
+        if final_descent_altitude_m <= 0:
+            raise ValueError("final_descent_altitude_m must be positive")
         self.detector = detector
         self.tracker = tracker
         self.optical = optical
         self.camera = camera
+        self.final_descent_altitude_m = float(final_descent_altitude_m)
+        self._final_descent_active = False
         self.precision_landing = precision_landing or PrecisionLandingController(
             PrecisionLandingConfig()
         )
+
+    @property
+    def final_descent_active(self) -> bool:
+        return self._final_descent_active
 
     def process(
         self,
@@ -73,6 +84,16 @@ class VisionModeController:
                 camera=self.camera,
             )
         normalized_mode = mode.strip().upper()
+        if normalized_mode not in LANDING_MODES:
+            self._final_descent_active = False
+        elif (
+            not self._final_descent_active
+            and altitude_m > 0
+            and bool(altitude_source.strip())
+            and altitude_source.strip().lower() != "unknown"
+            and altitude_m <= self.final_descent_altitude_m
+        ):
+            self._final_descent_active = True
         if (
             normalized_mode == "GUIDED"
             and effective_detection is not None
@@ -120,29 +141,31 @@ class VisionModeController:
             if effective_detection is not None
             else None
         )
-        landing_target = self.precision_landing.update(
-            offset,
-            detection=effective_detection,
-            mode=normalized_mode,
-            altitude_m=altitude_m,
-            altitude_source=altitude_source,
-            frame_timestamp=(
-                effective_detection.timestamp
-                if effective_detection is not None
-                else None
-            ),
-            now=now,
-            angles=angles,
-            distance_m=(
-                None
-                if altitude_m > 0
-                else 0.0
-            ),
-        )
+        if not self._final_descent_active:
+            landing_target = self.precision_landing.update(
+                offset,
+                detection=effective_detection,
+                mode=normalized_mode,
+                altitude_m=altitude_m,
+                altitude_source=altitude_source,
+                frame_timestamp=(
+                    effective_detection.timestamp
+                    if effective_detection is not None
+                    else None
+                ),
+                now=now,
+                angles=angles,
+                distance_m=(
+                    None
+                    if altitude_m > 0
+                    else 0.0
+                ),
+            )
         return ControllerOutput(
             detection=effective_detection,
             optical=optical,
             correction=correction,
             rc_takeover=optical.blocked,
             landing_target=landing_target,
+            final_descent_active=self._final_descent_active,
         )
