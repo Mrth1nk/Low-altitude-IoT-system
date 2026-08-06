@@ -67,6 +67,8 @@ class GuidedTracker:
         center_y: Optional[float],
         frame_width: int,
         frame_height: int,
+        desired_center_x: Optional[float] = None,
+        desired_center_y: Optional[float] = None,
         mode: str,
         frame_timestamp: Optional[float],
         now: float,
@@ -89,13 +91,24 @@ class GuidedTracker:
         ):
             return None
 
-        error_x = float(center_x) - float(frame_width) / 2.0
-        error_y = float(center_y) - float(frame_height) / 2.0
+        target_x = (
+            float(frame_width) / 2.0
+            if desired_center_x is None
+            else float(desired_center_x)
+        )
+        target_y = (
+            float(frame_height) / 2.0
+            if desired_center_y is None
+            else float(desired_center_y)
+        )
+        error_x = float(center_x) - target_x
+        error_y = float(center_y) - target_y
         normalized_x = error_x / (float(frame_width) / 2.0)
-        normalized_y = error_y / (float(frame_height) / 2.0)
+        # FORWARD mount: image top is aircraft-forward, so image Y is inverted.
+        normalized_forward = -error_y / (float(frame_height) / 2.0)
         forward = self._pixel_axis(
             error_y,
-            normalized_y,
+            normalized_forward,
             self.config.pixel_gain_forward,
         )
         right = self._pixel_axis(

@@ -116,8 +116,34 @@ class GuidedTrackerTests(unittest.TestCase):
         )
 
         self.assertIsNotNone(correction)
-        self.assertAlmostEqual(correction.forward_mps, -0.075, places=6)
+        self.assertAlmostEqual(correction.forward_mps, 0.075, places=6)
         self.assertAlmostEqual(correction.right_mps, 0.05625, places=6)
+
+    def test_desired_pixel_center_applies_camera_displacement(self):
+        tracker = GuidedTracker(
+            TrackerConfig(
+                pixel_deadzone=25.0,
+                pixel_gain_forward=0.6,
+                pixel_gain_right=0.6,
+                pixel_max_speed_mps=0.35,
+                pixel_send_hz=10.0,
+            )
+        )
+
+        correction = tracker.update_pixels(
+            center_x=320.0,
+            center_y=240.0,
+            desired_center_x=274.0,
+            desired_center_y=286.0,
+            frame_width=640,
+            frame_height=480,
+            mode="GUIDED",
+            frame_timestamp=1.0,
+            now=1.0,
+        )
+
+        self.assertGreater(correction.forward_mps, 0.0)
+        self.assertGreater(correction.right_mps, 0.0)
 
 
 if __name__ == "__main__":

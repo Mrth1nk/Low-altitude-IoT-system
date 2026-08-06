@@ -7,7 +7,12 @@ SOURCE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 BACKUP_DIR=
 COMMITTED=0
 legacy_state=
-LEGACY_SERVICES=(light-wifi-bridge.service light-ir-precision-land.service)
+LEGACY_SERVICES=(
+  light-wifi-bridge.service
+  onboard_bridge.service
+  light-ir-tracker.service
+  light-ir-precision-land.service
+)
 
 while (($#)); do
   case "$1" in

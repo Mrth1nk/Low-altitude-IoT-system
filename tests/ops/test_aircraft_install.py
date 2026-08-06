@@ -50,6 +50,7 @@ class AircraftServiceTests(unittest.TestCase):
             self.assertIn("Restart=on-failure", unit)
             self.assertIn("StartLimitIntervalSec=", unit)
             self.assertIn("StartLimitBurst=", unit)
+            self.assertIn("RuntimeDirectoryPreserve=yes", unit)
             self.assertIn(
                 "EnvironmentFile=/etc/low-altitude-iot/aircraft.env", unit
             )
@@ -77,6 +78,7 @@ class AircraftServiceTests(unittest.TestCase):
         self.assertIn("compgen -G", source)
         self.assertIn('[[ -e "$pattern" || -L "$pattern" ]]', source)
         self.assertIn("device is busy", source)
+        self.assertIn("vision camera missing at startup; runtime will retry", source)
 
 
 class AircraftRuntimeStateTests(unittest.TestCase):
@@ -258,6 +260,12 @@ class AircraftInstallerTests(unittest.TestCase):
         self.assertNotIn("set -x", source)
         self.assertIn("legacy_state", source)
         self.assertIn("restore_legacy_services", source)
+        for service in (
+            "onboard_bridge.service",
+            "light-ir-tracker.service",
+            "light-ir-precision-land.service",
+        ):
+            self.assertIn(service, source)
         self.assertIn("health_aircraft.sh", source)
         self.assertIn("source \"$env_file\"", source)
         self.assertNotIn('cp -a "$BACKUP_DIR/root/." "$(dest /)"', source)

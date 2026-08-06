@@ -218,21 +218,36 @@ class PrecisionLandingTests(unittest.TestCase):
         self.assertIsNotNone(next_target)
         self.assertAlmostEqual(next_target.frequency_hz, 1.0 / 0.11)
 
-    def test_invalid_altitude_and_non_landing_modes_emit_nothing(self):
+    def test_invalid_altitude_emits_nothing(self):
         controller = self.make_controller(acquire_count=1)
-        for mode, altitude in (("GUIDED", 2.0), ("LOITER", 2.0), ("LAND", 0.0)):
-            result = controller.update(
-                BodyOffset(0.2, 0.1),
-                detection=detection(1.0),
-                mode=mode,
-                altitude_m=altitude,
-                altitude_source="unknown",
-                frame_timestamp=1.0,
-                now=1.0,
-            )
-            self.assertIsNone(result)
+        result = controller.update(
+            BodyOffset(0.2, 0.1),
+            detection=detection(1.0),
+            mode="LAND",
+            altitude_m=0.0,
+            altitude_source="unknown",
+            frame_timestamp=1.0,
+            now=1.0,
+        )
+        self.assertIsNone(result)
 
-    def test_mode_controller_never_crosses_guided_and_land_outputs(self):
+    def test_non_landing_modes_still_emit_precision_sensor_targets(self):
+        for mode in ("STABILIZE", "GUIDED", "LOITER"):
+            with self.subTest(mode=mode):
+                controller = self.make_controller(acquire_count=1)
+                result = controller.update(
+                    BodyOffset(0.2, 0.1),
+                    detection=detection(1.0),
+                    mode=mode,
+                    altitude_m=2.0,
+                    altitude_source="rangefinder",
+                    frame_timestamp=1.0,
+                    now=1.0,
+                )
+                self.assertIsNotNone(result)
+                self.assertEqual(result.position_valid, 0)
+
+    def test_mode_controller_guided_tracking_also_feeds_precision_landing_sensor(self):
         detector = BrightSpotDetector(
             DetectorConfig(
                 threshold=220,
@@ -273,7 +288,7 @@ class PrecisionLandingTests(unittest.TestCase):
             now=1.1,
         )
         self.assertIsNotNone(guided.correction)
-        self.assertIsNone(guided.landing_target)
+        self.assertIsNotNone(guided.landing_target)
 
     def test_mode_controller_land_emits_image_angles_without_altitude(self):
         detector = BrightSpotDetector(

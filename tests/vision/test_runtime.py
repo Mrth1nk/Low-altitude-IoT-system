@@ -2,15 +2,19 @@ import unittest
 
 from vision.runtime import (
     OpticalStatePublisher,
+    camera_candidates,
     is_autopilot_heartbeat,
+    make_camera_capture,
     reopen_camera,
     request_vision_messages,
+    send_target_status_text,
 )
 
 
 class FakeCapture:
-    def __init__(self, opened=True):
+    def __init__(self, opened=True, read_ok=True):
         self.opened = opened
+        self.read_ok = read_ok
         self.released = False
         self.properties = []
 
@@ -24,8 +28,30 @@ class FakeCapture:
         self.properties.append((property_id, value))
         return True
 
+    def read(self):
+        return self.read_ok, object()
+
 
 class CameraRecoveryTests(unittest.TestCase):
+    def test_camera_path_is_opened_with_v4l2_backend(self):
+        calls = []
+
+        class Cv2:
+            CAP_V4L2 = 200
+
+            @staticmethod
+            def VideoCapture(*args):
+                calls.append(args)
+                return object()
+
+        result = make_camera_capture(Cv2, "/dev/v4l/by-id/infrared-camera")
+
+        self.assertIsNotNone(result)
+        self.assertEqual(
+            calls,
+            [("/dev/v4l/by-id/infrared-camera", Cv2.CAP_V4L2)],
+        )
+
     def test_reopens_camera_device_after_old_node_disappears(self):
         previous = FakeCapture()
         replacement = FakeCapture()
@@ -48,6 +74,53 @@ class CameraRecoveryTests(unittest.TestCase):
 
         self.assertIsNone(result)
         self.assertTrue(replacement.released)
+
+    def test_reopen_tries_fallback_camera_when_primary_disappears(self):
+        primary = FakeCapture(opened=False)
+        fallback = FakeCapture(opened=True)
+        opened = []
+
+        def factory(device):
+            opened.append(device)
+            return primary if device == "/dev/video21" else fallback
+
+        result = reopen_camera(
+            factory,
+            "/dev/video21",
+            fallback_devices=["/dev/video0"],
+        )
+
+        self.assertIs(result, fallback)
+        self.assertTrue(primary.released)
+        self.assertEqual(opened, ["/dev/video21", "/dev/video0"])
+
+    def test_reopen_skips_devices_that_open_but_cannot_read_a_frame(self):
+        primary = FakeCapture(opened=True, read_ok=False)
+        fallback = FakeCapture(opened=True, read_ok=True)
+        opened = []
+
+        def factory(device):
+            opened.append(device)
+            return primary if device == "/dev/video21" else fallback
+
+        result = reopen_camera(
+            factory,
+            "/dev/video21",
+            fallback_devices=["/dev/video0"],
+            validate_frame=True,
+        )
+
+        self.assertIs(result, fallback)
+        self.assertTrue(primary.released)
+        self.assertEqual(opened, ["/dev/video21", "/dev/video0"])
+
+    def test_camera_candidates_keep_primary_first_and_remove_duplicates(self):
+        candidates = camera_candidates(
+            "/dev/v4l/by-id/main",
+            extra_devices=["/dev/video0", "/dev/v4l/by-id/main", "/dev/video0"],
+        )
+
+        self.assertEqual(candidates[:2], ["/dev/v4l/by-id/main", "/dev/video0"])
 
     def test_opened_camera_uses_reference_resolution_and_single_frame_buffer(self):
         replacement = FakeCapture()
@@ -78,9 +151,13 @@ class FakeMessage:
 class FakeMav:
     def __init__(self):
         self.calls = []
+        self.status_texts = []
 
     def command_long_send(self, *args):
         self.calls.append(args)
+
+    def statustext_send(self, severity, message):
+        self.status_texts.append((severity, message))
 
 
 class FakeMaster:
@@ -107,6 +184,17 @@ class MavlinkSetupTests(unittest.TestCase):
         self.assertEqual(len(master.mav.calls), 3)
         self.assertEqual([call[4] for call in master.mav.calls], [33, 132, 32])
         self.assertTrue(all(call[5] == 100_000 for call in master.mav.calls))
+
+    def test_target_lock_status_is_visible_to_ground_station(self):
+        master = FakeMaster()
+
+        send_target_status_text(master, locked=True)
+        send_target_status_text(master, locked=False)
+
+        self.assertEqual(
+            [message for _severity, message in master.mav.status_texts],
+            [b"IR TARGET FOUND", b"IR TARGET LOST"],
+        )
 
 
 class FakeStore:

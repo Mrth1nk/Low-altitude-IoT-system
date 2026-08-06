@@ -81,8 +81,13 @@ if [[ "$ROLE" == vision || "$ROLE" == all ]]; then
   vision_mav="${VISION_MAV_DEVICE:-/dev/ttyS9}"
   camera="${VISION_CAMERA_DEVICE:-/dev/video0}"
   verify_udev_identity "$vision_mav" "${VISION_MAV_UDEV_MATCH:?VISION_MAV_UDEV_MATCH required}" "vision MAVLink"
-  verify_udev_identity "$camera" "${VISION_CAMERA_UDEV_MATCH:?VISION_CAMERA_UDEV_MATCH required}" "vision camera"
-  devices+=("$vision_mav" "$camera")
+  devices+=("$vision_mav")
+  if [[ -c "$camera" ]]; then
+    verify_udev_identity "$camera" "${VISION_CAMERA_UDEV_MATCH:?VISION_CAMERA_UDEV_MATCH required}" "vision camera"
+    devices+=("$camera")
+  else
+    echo "vision camera missing at startup; runtime will retry: $camera" >&2
+  fi
 fi
 
 declare -A seen=()

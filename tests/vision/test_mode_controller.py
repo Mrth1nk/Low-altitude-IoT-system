@@ -16,6 +16,13 @@ def bright_frame():
     return frame
 
 
+def centered_bright_frame():
+    frame = np.zeros((480, 640), dtype=np.uint8)
+    yy, xx = np.ogrid[:480, :640]
+    frame[(xx - 320) ** 2 + (yy - 240) ** 2 <= 10**2] = 255
+    return frame
+
+
 class VisionModeControllerTests(unittest.TestCase):
     def setUp(self):
         detector = BrightSpotDetector(
@@ -94,7 +101,32 @@ class VisionModeControllerTests(unittest.TestCase):
 
         self.assertTrue(result.optical.locked)
         self.assertIsNotNone(result.correction)
-        self.assertLess(result.correction.forward_mps, 0.0)
+        self.assertGreater(result.correction.forward_mps, 0.0)
+        self.assertGreater(result.correction.right_mps, 0.0)
+
+    def test_guided_compensates_forward_and_right_camera_displacement(self):
+        self.controller = VisionModeController(
+            detector=self.controller.detector,
+            tracker=GuidedTracker(TrackerConfig()),
+            optical=OpticalStateMachine(OpticalConfig(acquire_count=2, loss_count=1)),
+            camera=CameraConfig(offset_forward_m=0.20, offset_right_m=0.20),
+        )
+        self.controller.process(
+            centered_bright_frame(),
+            mode="GUIDED",
+            altitude_m=2.0,
+            timestamp=4.0,
+            now=4.0,
+        )
+        result = self.controller.process(
+            centered_bright_frame(),
+            mode="GUIDED",
+            altitude_m=2.0,
+            timestamp=4.1,
+            now=4.1,
+        )
+
+        self.assertGreater(result.correction.forward_mps, 0.0)
         self.assertGreater(result.correction.right_mps, 0.0)
 
 

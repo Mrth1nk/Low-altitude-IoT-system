@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import glob
 from pathlib import Path
 import signal
 import threading
@@ -21,6 +22,7 @@ from .precision_landing import send_landing_target
 MAV_TYPE_GCS = 6
 MAV_AUTOPILOT_INVALID = 8
 MAV_CMD_SET_MESSAGE_INTERVAL = 511
+MAV_SEVERITY_NOTICE = 5
 VISION_MESSAGE_IDS = (33, 132, 32)  # GLOBAL_POSITION_INT, DISTANCE_SENSOR, LOCAL_POSITION_NED
 
 
@@ -67,6 +69,36 @@ def request_vision_messages(master, interval_us=100_000):
         )
 
 
+def make_camera_capture(cv2_module, camera_device):
+    return cv2_module.VideoCapture(camera_device, cv2_module.CAP_V4L2)
+
+
+def camera_candidates(primary, extra_devices=None):
+    candidates = []
+
+    def add(path):
+        if path and path not in candidates:
+            candidates.append(path)
+
+    add(primary)
+    if extra_devices:
+        for path in extra_devices:
+            add(path)
+    for pattern in ("/dev/v4l/by-id/*", "/dev/video*"):
+        for path in sorted(glob.glob(pattern)):
+            add(path)
+    return candidates
+
+
+def send_target_status_text(master, *, locked):
+    message = b"IR TARGET FOUND" if locked else b"IR TARGET LOST"
+    master.mav.statustext_send(MAV_SEVERITY_NOTICE, message)
+
+
+def send_guided_tracking_active_text(master):
+    master.mav.statustext_send(MAV_SEVERITY_NOTICE, b"IR TRACKING ACTIVE")
+
+
 def reopen_camera(
     capture_factory,
     camera_device,
@@ -74,16 +106,25 @@ def reopen_camera(
     *,
     width=640,
     height=480,
+    fallback_devices=None,
+    validate_frame=False,
 ):
+    candidates = camera_candidates(camera_device, fallback_devices)
     if previous is not None:
         previous.release()
-    camera = capture_factory(camera_device)
-    if camera.isOpened():
-        camera.set(3, int(width))
-        camera.set(4, int(height))
-        camera.set(38, 1)
-        return camera
-    camera.release()
+    for device in candidates:
+        camera = capture_factory(device)
+        if camera.isOpened():
+            camera.set(3, int(width))
+            camera.set(4, int(height))
+            camera.set(38, 1)
+            if validate_frame:
+                ok, _frame = camera.read()
+                if not ok:
+                    camera.release()
+                    continue
+            return camera
+        camera.release()
     return None
 
 
@@ -202,9 +243,12 @@ def run():
     )
     wait_for_autopilot_heartbeat(master, timeout=10)
     request_vision_messages(master)
-    camera = reopen_camera(cv2.VideoCapture, camera_device)
-    if camera is None:
-        raise RuntimeError(f"camera unavailable: {camera_device}")
+    capture_factory = lambda device: make_camera_capture(cv2, device)
+    camera = reopen_camera(
+        capture_factory,
+        camera_device,
+        validate_frame=True,
+    )
     preview = PreviewServer(
         os.environ.get("VISION_STREAM_HOST", "0.0.0.0"),
         int(os.environ.get("VISION_STREAM_PORT", "8090")),
@@ -258,11 +302,18 @@ def run():
     )
     stop = threading.Event()
     mode = "UNKNOWN"
+    force_guided_tracking = os.environ.get("VISION_FORCE_GUIDED_TRACKING", "0") == "1"
     altitude_m = 0.0
     altitude_source = "unknown"
     guided_tx_count = 0
     landing_tx_count = 0
+    status_text_tx_count = 0
+    last_announced_lock = None
+    guided_tracking_announced = False
+    last_status_text = ""
     last_control = None
+    last_guided_control = None
+    last_landing_control = None
 
     def request_stop(_signum, _frame):
         stop.set()
@@ -288,8 +339,13 @@ def run():
                 message = master.recv_match(blocking=False)
 
             wall_timestamp = time.time()
+            control_mode = "GUIDED" if force_guided_tracking else mode
             if camera is None:
-                camera = reopen_camera(cv2.VideoCapture, camera_device)
+                camera = reopen_camera(
+                    capture_factory,
+                    camera_device,
+                    validate_frame=True,
+                )
                 if camera is None:
                     publisher.publish(
                         locked=False,
@@ -312,9 +368,10 @@ def run():
                     last_error="camera_frame_failed",
                 )
                 camera = reopen_camera(
-                    cv2.VideoCapture,
+                    capture_factory,
                     camera_device,
                     camera,
+                    validate_frame=True,
                 )
                 time.sleep(0.20 if camera is None else 0.05)
                 continue
@@ -322,30 +379,53 @@ def run():
             now = time.monotonic()
             output = controller.process(
                 gray,
-                mode=mode,
+                mode=control_mode,
                 altitude_m=altitude_m,
                 altitude_source=altitude_source,
                 timestamp=now,
                 now=now,
             )
+            if output.optical.locked != last_announced_lock:
+                send_target_status_text(
+                    master,
+                    locked=output.optical.locked,
+                )
+                last_announced_lock = output.optical.locked
+                last_status_text = (
+                    "IR TARGET FOUND"
+                    if output.optical.locked
+                    else "IR TARGET LOST"
+                )
+                status_text_tx_count += 1
             if output.correction is not None:
+                if not guided_tracking_announced:
+                    send_guided_tracking_active_text(master)
+                    last_status_text = "IR TRACKING ACTIVE"
+                    status_text_tx_count += 1
+                    guided_tracking_announced = True
                 _send_guided_velocity(master, output.correction)
                 guided_tx_count += 1
-                last_control = {
+                last_guided_control = {
                     "kind": "guided_velocity",
                     "forward_mps": output.correction.forward_mps,
                     "right_mps": output.correction.right_mps,
                     "timestamp": wall_timestamp,
                 }
+                last_control = last_guided_control
+            else:
+                if control_mode.strip().upper() != "GUIDED" or not output.optical.locked:
+                    guided_tracking_announced = False
             if output.landing_target is not None:
                 send_landing_target(master.mav, output.landing_target)
                 landing_tx_count += 1
-                last_control = {
+                last_landing_control = {
                     "kind": "landing_target",
                     "angle_x": output.landing_target.angle_x,
                     "angle_y": output.landing_target.angle_y,
                     "timestamp": wall_timestamp,
                 }
+                if last_control is None or last_control.get("kind") != "guided_velocity":
+                    last_control = last_landing_control
 
             preview_frame = frame.copy()
             optical = output.optical
@@ -373,11 +453,17 @@ def run():
                 mode=mode,
                 timestamp=wall_timestamp,
                 last_error="" if output.optical.locked else "optical_blocked",
+                control_mode=control_mode,
+                force_guided_tracking=force_guided_tracking,
                 altitude_m=altitude_m,
                 altitude_source=altitude_source,
                 guided_tx_count=guided_tx_count,
                 landing_tx_count=landing_tx_count,
+                status_text_tx_count=status_text_tx_count,
+                last_status_text=last_status_text,
                 last_control=last_control,
+                last_guided_control=last_guided_control,
+                last_landing_control=last_landing_control,
                 frame_width=int(gray.shape[1]),
                 frame_height=int(gray.shape[0]),
                 target_x=(

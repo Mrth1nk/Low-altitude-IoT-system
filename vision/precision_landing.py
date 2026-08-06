@@ -103,10 +103,6 @@ class PrecisionLandingController:
         angles: Optional[BodyAngles] = None,
         distance_m: Optional[float] = None,
     ) -> Optional[LandingTarget]:
-        if mode.strip().upper() not in LANDING_MODES:
-            self.reset()
-            return None
-
         valid = (
             detection is not None
             and frame_timestamp is not None

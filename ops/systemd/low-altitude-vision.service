@@ -17,6 +17,7 @@ ExecStart=/usr/bin/python3 -m vision.runtime
 Restart=on-failure
 RestartSec=2
 RuntimeDirectory=low-altitude-iot
+RuntimeDirectoryPreserve=yes
 UMask=0077
 DevicePolicy=closed
 DeviceAllow=/dev/ttyS9 rw

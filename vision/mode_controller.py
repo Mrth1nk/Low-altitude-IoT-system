@@ -11,7 +11,6 @@ from .geometry import detection_to_body_angles, detection_to_body_offset
 from .guided_tracker import Correction, GuidedTracker
 from .optical_state import OpticalSnapshot, OpticalStateMachine
 from .precision_landing import (
-    LANDING_MODES,
     LandingTarget,
     PrecisionLandingConfig,
     PrecisionLandingController,
@@ -79,11 +78,30 @@ class VisionModeController:
             and effective_detection is not None
             and optical.locked
         ):
+            frame_width = int(gray.shape[1])
+            frame_height = int(gray.shape[0])
+            desired_center_x = float(frame_width) / 2.0
+            desired_center_y = float(frame_height) / 2.0
+            if altitude_m > 0:
+                scaled_fx = self.camera.fx * frame_width / self.camera.width
+                scaled_fy = self.camera.fy * frame_height / self.camera.height
+                # With the aircraft origin over the beacon, a forward/right
+                # displaced camera sees the beacon behind/left of image center.
+                desired_center_x -= (
+                    self.camera.offset_right_m / altitude_m * scaled_fx
+                )
+                desired_center_y += (
+                    self.camera.offset_forward_m / altitude_m * scaled_fy
+                )
+                desired_center_x = max(0.0, min(float(frame_width), desired_center_x))
+                desired_center_y = max(0.0, min(float(frame_height), desired_center_y))
             correction = self.tracker.update_pixels(
                 center_x=effective_detection.center_x,
                 center_y=effective_detection.center_y,
-                frame_width=int(gray.shape[1]),
-                frame_height=int(gray.shape[0]),
+                frame_width=frame_width,
+                frame_height=frame_height,
+                desired_center_x=desired_center_x,
+                desired_center_y=desired_center_y,
                 mode=mode,
                 frame_timestamp=effective_detection.timestamp,
                 now=now,
@@ -92,46 +110,35 @@ class VisionModeController:
             self.tracker.update(
                 None, mode=mode, frame_timestamp=None, now=now
             )
-        if normalized_mode in LANDING_MODES:
-            angles = (
-                detection_to_body_angles(
-                    effective_detection.center_x,
-                    effective_detection.center_y,
-                    camera=self.camera,
-                    altitude_m=altitude_m,
-                )
+        angles = (
+            detection_to_body_angles(
+                effective_detection.center_x,
+                effective_detection.center_y,
+                camera=self.camera,
+                altitude_m=altitude_m,
+            )
+            if effective_detection is not None
+            else None
+        )
+        landing_target = self.precision_landing.update(
+            offset,
+            detection=effective_detection,
+            mode=normalized_mode,
+            altitude_m=altitude_m,
+            altitude_source=altitude_source,
+            frame_timestamp=(
+                effective_detection.timestamp
                 if effective_detection is not None
                 else None
-            )
-            landing_target = self.precision_landing.update(
-                offset,
-                detection=effective_detection,
-                mode=normalized_mode,
-                altitude_m=altitude_m,
-                altitude_source=altitude_source,
-                frame_timestamp=(
-                    effective_detection.timestamp
-                    if effective_detection is not None
-                    else None
-                ),
-                now=now,
-                angles=angles,
-                distance_m=(
-                    None
-                    if altitude_m > 0
-                    else 0.0
-                ),
-            )
-        else:
-            self.precision_landing.update(
-                None,
-                detection=None,
-                mode=normalized_mode,
-                altitude_m=altitude_m,
-                altitude_source=altitude_source,
-                frame_timestamp=None,
-                now=now,
-            )
+            ),
+            now=now,
+            angles=angles,
+            distance_m=(
+                None
+                if altitude_m > 0
+                else 0.0
+            ),
+        )
         return ControllerOutput(
             detection=effective_detection,
             optical=optical,
