@@ -75,6 +75,19 @@ class ConfigureRdkNetworkTests(unittest.TestCase):
         )
         self.assertIn("connection.autoconnect no", development.stdout)
 
+    def test_persistent_demo_profile_has_explicit_boot_priority(self):
+        result = run_script(
+            CONFIGURE,
+            "--dry-run",
+            "--mode",
+            "demo",
+            "--persist",
+            extra_env={"RDK_WIFI_PASSWORD": SECRET},
+        )
+        output = result.stdout + result.stderr
+        self.assertEqual(result.returncode, 0, output)
+        self.assertIn("connection.autoconnect-priority 200", output)
+
     def test_recovery_only_changes_wifi_and_never_mentions_secret(self):
         result = run_script(
             CONFIGURE,

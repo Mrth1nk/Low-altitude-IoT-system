@@ -9,6 +9,7 @@ SSID="${RDK_WIFI_SSID:-woshinailong}"
 PROFILE="${RDK_WIFI_PROFILE:-low-altitude-aircraft}"
 AIRCRAFT_HOST="${AIRCRAFT_HOST:-192.168.4.1}"
 DEVELOPMENT_PROFILE="${RDK_DEVELOPMENT_PROFILE:-}"
+AUTOCONNECT_PRIORITY="${RDK_WIFI_AUTOCONNECT_PRIORITY:-200}"
 
 usage() {
   cat <<'EOF'
@@ -98,7 +99,8 @@ run nmcli connection modify "$PROFILE" \
   ipv4.never-default yes \
   ipv4.routes "$AIRCRAFT_HOST/32" \
   ipv6.never-default yes \
-  connection.autoconnect "$autoconnect"
+  connection.autoconnect "$autoconnect" \
+  connection.autoconnect-priority "$AUTOCONNECT_PRIORITY"
 
 if [[ "$MODE" != development ]]; then
   if ((DRY_RUN)); then
