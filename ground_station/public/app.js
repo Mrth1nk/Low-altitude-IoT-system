@@ -26,6 +26,7 @@ const els = {
   roverMode: $("roverWaypointMode"),
   roverTimeline: $("roverTimeline"),
   speed: $("speedInput"),
+  speedField: $("speedField"),
   taskBanner: $("taskBanner"),
   taskDetail: $("taskBannerDetail"),
   taskTitle: $("taskBannerTitle"),
@@ -121,7 +122,7 @@ function aircraftDetails(aircraft) {
     ["高度", aircraft.altitude != null ? `${Number(aircraft.altitude).toFixed(2)} m` : "-"],
     ["速度", aircraft.ground_speed != null ? `${Number(aircraft.ground_speed).toFixed(2)} m/s` : "-"],
     ["航向", Number.isFinite(normalizedHeading) ? `${normalizedHeading.toFixed(2)}°` : "-"],
-    ["位置", validCoord(aircraft.lat, aircraft.lng) ? `${Number(aircraft.lat).toFixed(2)}, ${Number(aircraft.lng).toFixed(2)}` : "-"],
+    ["位置", Core.formatObservedPosition(aircraft)],
     ["任务", aircraft.mission_status || "-"],
   ];
 }
@@ -142,6 +143,7 @@ function renderState(state) {
     ["电量", `${telemetry.battery_percent ?? "-"}%`],
     ["速度", `${telemetry.ground_speed ?? "-"} m/s`],
     ["LTE", `${telemetry.lte_rssi ?? "-"} dBm`],
+    ["位置", Core.formatObservedPosition(telemetry)],
   ]);
   renderTimeline(els.roverTimeline, telemetry, "rover");
   renderTimeline(els.aircraftTimeline, telemetry, "aircraft");
@@ -349,15 +351,38 @@ function updateMapFromState(telemetry, aircraft) {
   redrawRoutes();
 }
 
+function currentVehiclePosition(vehicle) {
+  const source = vehicle === "aircraft"
+    ? latestState?.aircraft
+    : latestState?.telemetry;
+  const lat = Number(source?.lat);
+  const lng = Number(source?.lng);
+  return validCoord(lat, lng) ? {lat, lng} : null;
+}
+
+function segmentDistanceLabel(distance, index) {
+  const prefix = index === 0 ? "距当前位置" : "距上一点";
+  return Number.isFinite(distance)
+    ? `${prefix} ${distance.toFixed(1)} m`
+    : `${prefix} -`;
+}
+
 function redrawRoutes() {
   if (!map) return;
   roverPath.setLatLngs(routes.rover.map((point) => [point.lat, point.lng]));
   aircraftPath.setLatLngs(routes.aircraft.map((point) => [point.lat, point.lng]));
   for (const vehicle of ["rover", "aircraft"]) {
+    const distances = Core.routeSegmentDistances(
+      routes[vehicle],
+      currentVehiclePosition(vehicle),
+    );
     for (const marker of waypointMarkers[vehicle]) map.removeLayer(marker);
     waypointMarkers[vehicle].length = 0;
     routes[vehicle].forEach((point, index) => {
       const color = vehicle === "rover" ? "rover" : "aircraft";
+      const distance = distances[index];
+      const distanceLabel = segmentDistanceLabel(distance, index);
+      const pointLabel = point.autoReturn ? "返航点" : `航点 ${index + 1}`;
       const marker = L.marker([point.lat, point.lng], {
         icon: L.divIcon({
           className: `waypoint-icon ${color}`,
@@ -368,7 +393,7 @@ function redrawRoutes() {
         keyboard: false,
         zIndexOffset: 500 + index,
       }).addTo(map).bindTooltip(
-        `${vehicle === "rover" ? "小车" : "飞机"}航点 ${index + 1}`,
+        `${vehicle === "rover" ? "小车" : "飞机"}${pointLabel}<br>${distanceLabel}`,
         {direction: "top", offset: [0, -12]},
       );
       waypointMarkers[vehicle].push(marker);
@@ -388,7 +413,7 @@ function setVehicleMode(vehicle) {
   const aircraft = selectedVehicle === "aircraft";
   els.roverMode.classList.toggle("active", !aircraft);
   els.aircraftMode.classList.toggle("active", aircraft);
-  els.speed.hidden = aircraft;
+  els.speedField.hidden = aircraft;
   els.altitude.hidden = !aircraft;
   els.uploadMission.textContent = aircraft ? "上传飞机任务" : "上传小车任务";
   updateMissionButton();
@@ -418,7 +443,11 @@ function pointFromInputs() {
 function addWaypoint() {
   try {
     const point = pointFromInputs();
-    routes[selectedVehicle].push(point);
+    const route = routes[selectedVehicle];
+    for (let index = route.length - 1; index >= 0; index -= 1) {
+      if (route[index]?.autoReturn === true) route.splice(index, 1);
+    }
+    route.push(point);
     arrivalKey = "";
     renderQueue();
     redrawRoutes();
@@ -444,11 +473,16 @@ function currentMissionIndex() {
 function renderQueue() {
   const route = routes[selectedVehicle];
   const current = currentMissionIndex();
+  const distances = Core.routeSegmentDistances(
+    route,
+    currentVehiclePosition(selectedVehicle),
+  );
   els.queueSummary.textContent = `${route.length} 个航点`;
   els.queue.innerHTML = route.map((point, index) => (
     `<div class="queue-row ${index === current ? "current" : ""}">`
     + `<strong>${index + 1}</strong>`
-    + `<span>${point.lat.toFixed(6)}, ${point.lng.toFixed(6)}</span>`
+    + `<span>${point.lat.toFixed(6)}, ${point.lng.toFixed(6)}${point.autoReturn ? " · 返航" : ""}</span>`
+    + `<small>${segmentDistanceLabel(distances[index], index)}</small>`
     + `<em>${selectedVehicle === "rover" ? `${point.speed.toFixed(1)} m/s` : `${Number(els.altitude.value || 0).toFixed(0)} m`}</em>`
     + "</div>"
   )).join("");
@@ -484,13 +518,20 @@ async function postCommand(command, {quiet = false} = {}) {
 }
 
 async function uploadMission() {
-  const route = routes[selectedVehicle];
+  let route = routes[selectedVehicle];
   try {
     if (
       selectedVehicle === "aircraft"
       && (!latestState || !Core.aircraftCommandsAllowed(latestState))
     ) {
       throw new Error("OPTICAL LINK BLOCKED");
+    }
+    if (selectedVehicle === "aircraft") {
+      const prepared = Core.prepareAircraftUploadRoute(route, latestState);
+      routes.aircraft.splice(0, routes.aircraft.length, ...prepared);
+      route = routes.aircraft;
+      renderQueue();
+      redrawRoutes();
     }
     const command = Core.buildMissionCommand(selectedVehicle, route, {
       altitude: Number(els.altitude.value),
@@ -552,14 +593,7 @@ function clamp(value, low, high) {
 }
 
 function distanceMeters(lat1, lng1, lat2, lng2) {
-  const radius = 6371000;
-  const radians = (value) => value * Math.PI / 180;
-  const dLat = radians(Number(lat2) - Number(lat1));
-  const dLng = radians(Number(lng2) - Number(lng1));
-  const a = Math.sin(dLat / 2) ** 2
-    + Math.cos(radians(Number(lat1))) * Math.cos(radians(Number(lat2)))
-    * Math.sin(dLng / 2) ** 2;
-  return radius * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+  return Core.distanceMeters(lat1, lng1, lat2, lng2);
 }
 
 $("refreshBtn").onclick = refresh;

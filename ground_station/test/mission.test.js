@@ -7,12 +7,99 @@ const {
   buildMissionCommand,
   filterCommandProperties,
   isAircraftCommand,
+  prepareAircraftUploadRoute,
+  routeSegmentDistances,
 } = require("../public/core.js");
 
 const points = [
   {lat: 32.1197, lng: 118.9531, speed: 0.8},
   {lat: 32.1198, lng: 118.9533, speed: 1.2},
 ];
+
+test("calculates the first segment from current position and later route segments", () => {
+  const origin = {lat: 32.1197, lng: 118.9531};
+  const route = [
+    {lat: 32.1198, lng: 118.9531},
+    {lat: 32.1198, lng: 118.9533},
+  ];
+
+  const distances = routeSegmentDistances(route, origin);
+
+  assert.equal(distances.length, 2);
+  assert.ok(distances[0] > 10 && distances[0] < 12);
+  assert.ok(distances[1] > 18 && distances[1] < 20);
+  assert.deepEqual(routeSegmentDistances(route, null), [null, distances[1]]);
+});
+
+test("appends exactly one current aircraft position as the final return point", () => {
+  const route = [
+    {lat: 32.1198, lng: 118.9531},
+    {lat: 32.1198, lng: 118.9533},
+    {lat: 1, lng: 1, autoReturn: true},
+  ];
+  const state = {
+    online: true,
+    state_fresh: true,
+    optical: {blocked: false},
+    aircraft: {
+      link_active: true,
+      blocked: false,
+      lat: 32.1197,
+      lng: 118.9531,
+    },
+  };
+
+  const prepared = prepareAircraftUploadRoute(route, state);
+
+  assert.equal(prepared.length, 3);
+  assert.deepEqual(prepared.at(-1), {
+    lat: 32.1197,
+    lng: 118.9531,
+    autoReturn: true,
+  });
+  assert.equal(prepared.filter((point) => point.autoReturn).length, 1);
+  assert.deepEqual(route.at(-1), {lat: 1, lng: 1, autoReturn: true});
+});
+
+test("rejects an unsafe aircraft return-position snapshot", () => {
+  const route = [{lat: 32.1198, lng: 118.9531}];
+  const ready = {
+    online: true,
+    state_fresh: true,
+    optical: {blocked: false},
+    aircraft: {link_active: true, lat: 32.1197, lng: 118.9531},
+  };
+
+  assert.throws(
+    () => prepareAircraftUploadRoute(route, {...ready, state_fresh: false}),
+    /stale/i,
+  );
+  assert.throws(
+    () => prepareAircraftUploadRoute(route, {
+      ...ready,
+      optical: {blocked: true},
+    }),
+    /blocked/i,
+  );
+  assert.throws(
+    () => prepareAircraftUploadRoute(route, {
+      ...ready,
+      aircraft: {...ready.aircraft, lat: undefined, lng: undefined},
+    }),
+    /position/i,
+  );
+  assert.throws(
+    () => prepareAircraftUploadRoute(route, {
+      ...ready,
+      aircraft: {...ready.aircraft, lat: 0, lng: 0},
+    }),
+    /position/i,
+  );
+  assert.throws(
+    () => prepareAircraftUploadRoute([], ready),
+    /at least one/i,
+  );
+});
 
 test("builds one complete rover mission with speed commands and no fabricated home", () => {
   const command = buildMissionCommand("rover", points, {

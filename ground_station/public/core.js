@@ -257,6 +257,65 @@
       && (Math.abs(lat) > 0.000001 || Math.abs(lon) > 0.000001);
   }
 
+  function distanceMeters(lat1, lon1, lat2, lon2) {
+    const radius = 6371000;
+    const radians = (value) => Number(value) * Math.PI / 180;
+    const dLat = radians(Number(lat2) - Number(lat1));
+    const dLon = radians(Number(lon2) - Number(lon1));
+    const a = Math.sin(dLat / 2) ** 2
+      + Math.cos(radians(lat1)) * Math.cos(radians(lat2))
+      * Math.sin(dLon / 2) ** 2;
+    return radius * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+  }
+
+  function routeSegmentDistances(points, origin) {
+    return points.map((point, index) => {
+      const previous = index === 0 ? origin : points[index - 1];
+      const previousLat = Number(previous?.lat);
+      const previousLon = Number(previous?.lng ?? previous?.lon);
+      const pointLat = Number(point?.lat);
+      const pointLon = Number(point?.lng ?? point?.lon);
+      if (
+        !validCoordinate(previousLat, previousLon)
+        || !validCoordinate(pointLat, pointLon)
+      ) {
+        return null;
+      }
+      return distanceMeters(previousLat, previousLon, pointLat, pointLon);
+    });
+  }
+
+  function prepareAircraftUploadRoute(points, state) {
+    const manualPoints = Array.isArray(points)
+      ? points.filter((point) => point?.autoReturn !== true)
+      : [];
+    if (manualPoints.length === 0) {
+      throw new ValueError("aircraft mission requires at least one point");
+    }
+    if (!state?.state_fresh) {
+      throw new ValueError("aircraft state is stale");
+    }
+    if (!aircraftCommandsAllowed(state)) {
+      throw new ValueError("OPTICAL LINK BLOCKED");
+    }
+    const aircraft = state.aircraft || {};
+    const lat = Number(aircraft.lat);
+    const lng = Number(aircraft.lng);
+    if (!validCoordinate(lat, lng)) {
+      throw new ValueError("aircraft current position is unavailable");
+    }
+    return manualPoints.concat({lat, lng, autoReturn: true});
+  }
+
+  function formatObservedPosition(vehicle, digits = 5) {
+    if (vehicle?.position_observed !== true) return "-";
+    const lat = Number(vehicle.lat);
+    const lon = Number(vehicle.lng);
+    if (!Number.isFinite(lat) || !Number.isFinite(lon)) return "-";
+    const places = Math.max(0, Math.min(7, Number(digits) || 5));
+    return `${lat.toFixed(places)}, ${lon.toFixed(places)}`;
+  }
+
   function normalizePoint(point, index) {
     const lat = Number(point?.lat);
     const lon = Number(point?.lng ?? point?.lon);
@@ -449,9 +508,13 @@
     aircraftCommandsAllowed,
     aircraftHeartbeatSummary,
     buildMissionCommand,
+    distanceMeters,
     filterCommandProperties,
+    formatObservedPosition,
     isAircraftCommand,
     normalizeCloudState,
+    prepareAircraftUploadRoute,
+    routeSegmentDistances,
     transactionTimeline,
     validCoordinate,
   };

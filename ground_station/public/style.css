@@ -138,6 +138,26 @@ input {
   font: inherit;
   font-size: 12px;
 }
+.mission-field {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  height: 32px;
+  padding: 0 7px;
+  border: 1px solid #c6d0dd;
+  border-radius: 6px;
+  color: var(--muted);
+  font-size: 10px;
+  white-space: nowrap;
+}
+.mission-field input {
+  height: 30px;
+  padding: 0 5px;
+  border: 0;
+  outline: 0;
+  color: var(--ink);
+}
+.mission-field strong { font-size: 10px; font-weight: 600; }
 .mission-actions {
   display: grid;
   grid-template-columns: 150px 1fr auto;
@@ -165,12 +185,13 @@ input {
 }
 .queue-row {
   display: grid;
-  grid-template-columns: 26px minmax(0, 1fr) 72px;
+  grid-template-columns: 26px minmax(0, 1fr) 108px 62px;
   gap: 6px;
   padding: 4px 3px;
   border-bottom: 1px solid #edf1f5;
   font-size: 11px;
 }
+.queue-row small { color: var(--muted); font-size: 10px; white-space: nowrap; }
 
 .waypoint-icon {
   background: transparent;

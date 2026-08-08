@@ -38,7 +38,11 @@
       <div class="mission-editor">
         <input id="latInput" inputmode="decimal" aria-label="纬度" placeholder="纬度">
         <input id="lngInput" inputmode="decimal" aria-label="经度" placeholder="经度">
-        <input id="speedInput" inputmode="decimal" aria-label="速度" value="0.8" placeholder="速度 m/s">
+        <label id="speedField" class="mission-field" aria-label="小车航点速度">
+          <span>速度</span>
+          <input id="speedInput" inputmode="decimal" aria-label="速度" value="0.8">
+          <strong>m/s</strong>
+        </label>
         <input id="altitudeInput" inputmode="decimal" aria-label="统一高度" value="20" placeholder="统一高度 m" hidden>
         <button id="queueWaypointBtn" class="secondary">加入队列</button>
         <button id="clearWaypointQueueBtn" class="icon-command secondary" title="清空当前任务">清空</button>
