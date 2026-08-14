@@ -19,12 +19,87 @@ def compact_json_bytes(data: dict[str, Any], max_bytes: int = 480) -> str:
     if len(text.encode("utf-8")) <= max_bytes:
         return text
 
+    if str(data.get("last_command", "")).lower() == "auto":
+        source_aircraft = (
+            data.get("aircraft")
+            if isinstance(data.get("aircraft"), dict)
+            else {}
+        )
+        auto_aircraft = {
+            "link_active": source_aircraft.get(
+                "link_active", data.get("aircraft_link")
+            ),
+            "mode": data.get("aircraft_mode", source_aircraft.get("mode")),
+            "armed": data.get("aircraft_armed", source_aircraft.get("armed")),
+            "position_observed": data.get(
+                "aircraft_position_observed",
+                source_aircraft.get("position_observed", False),
+            ),
+            "lat": data.get("aircraft_lat", source_aircraft.get("lat")),
+            "lng": data.get("aircraft_lng", source_aircraft.get("lng")),
+            "altitude": data.get(
+                "aircraft_altitude", source_aircraft.get("altitude")
+            ),
+            "heading": data.get(
+                "aircraft_heading", source_aircraft.get("heading")
+            ),
+        }
+        for key in ("lat", "lng"):
+            if isinstance(auto_aircraft.get(key), (int, float)):
+                auto_aircraft[key] = round(float(auto_aircraft[key]), 5)
+        for key in ("altitude", "heading"):
+            if isinstance(auto_aircraft.get(key), (int, float)):
+                auto_aircraft[key] = round(float(auto_aircraft[key]), 2)
+        auto_aircraft = {
+            key: value
+            for key, value in auto_aircraft.items()
+            if value is not None
+        }
+        auto_state = {
+            "updated_at": data.get("updated_at"),
+            "lat": round(float(data.get("lat", 0.0)), 5),
+            "lng": round(float(data.get("lng", 0.0)), 5),
+            "position_observed": bool(data.get("position_observed", False)),
+            "flight_mode": data.get("flight_mode"),
+            "armed": data.get("armed"),
+            "fc_link": data.get("fc_link"),
+            "gps_fix_type": data.get("gps_fix_type"),
+            "satellites_visible": data.get("satellites_visible"),
+            "rover_tx_stage": data.get("rover_tx_stage"),
+            "mission_status": str(data.get("mission_status", ""))[:48],
+            "fault_text": str(data.get("fault_text", ""))[:96],
+            "last_command": "auto",
+            "aircraft_link": data.get("aircraft_link"),
+            "aircraft": auto_aircraft,
+        }
+        auto_state = {
+            key: value
+            for key, value in auto_state.items()
+            if value not in (None, "")
+        }
+        for key in ("mission_status", "fc_link"):
+            text = dump(auto_state)
+            if len(text.encode("utf-8")) <= max_bytes:
+                return text
+            auto_state.pop(key, None)
+        for key in ("altitude", "heading"):
+            text = dump(auto_state)
+            if len(text.encode("utf-8")) <= max_bytes:
+                return text
+            auto_aircraft.pop(key, None)
+        if "fault_text" in auto_state:
+            auto_state["fault_text"] = auto_state["fault_text"][:64]
+        text = dump(auto_state)
+        if len(text.encode("utf-8")) <= max_bytes:
+            return text
+
     aircraft = data.get("aircraft")
     if isinstance(aircraft, dict):
         curated_keys = (
             "updated_at",
             "lat",
             "lng",
+            "position_observed",
             "ground_speed",
             "heading",
             "battery_percent",
@@ -65,6 +140,10 @@ def compact_json_bytes(data: dict[str, Any], max_bytes: int = 480) -> str:
                     "battery_percent": data.get("aircraft_battery_percent"),
                     "lat": data.get("aircraft_lat"),
                     "lng": data.get("aircraft_lng"),
+                    "position_observed": data.get(
+                        "aircraft_position_observed",
+                        aircraft.get("position_observed"),
+                    ),
                     "altitude": data.get("aircraft_altitude"),
                     "ground_speed": data.get("aircraft_ground_speed"),
                     "heading": data.get("aircraft_heading"),
@@ -81,7 +160,12 @@ def compact_json_bytes(data: dict[str, Any], max_bytes: int = 480) -> str:
                     }
                     for item in selected_messages
                 ]
-                prioritized = {key: data[key] for key in curated_keys if key in data}
+                prioritized = {
+                    key: data[key]
+                    for key in curated_keys
+                    if key in data
+                    and (key != "position_observed" or data[key] is True)
+                }
                 prioritized["aircraft"] = compact_aircraft
                 text = dump(prioritized)
                 if len(text.encode("utf-8")) <= max_bytes:
@@ -100,6 +184,12 @@ def compact_json_bytes(data: dict[str, Any], max_bytes: int = 480) -> str:
                     "link_active": aircraft.get("link_active"),
                     "mode": data.get("aircraft_mode"),
                     "armed": data.get("aircraft_armed"),
+                    "lat": data.get("aircraft_lat", aircraft.get("lat")),
+                    "lng": data.get("aircraft_lng", aircraft.get("lng")),
+                    "position_observed": data.get(
+                        "aircraft_position_observed",
+                        aircraft.get("position_observed"),
+                    ),
                     "altitude": data.get("aircraft_altitude"),
                     "ground_speed": data.get("aircraft_ground_speed"),
                     "heading": data.get("aircraft_heading"),
@@ -118,10 +208,13 @@ def compact_json_bytes(data: dict[str, Any], max_bytes: int = 480) -> str:
                     for key, value in mission_aircraft.items()
                     if value is not None
                 }
+                for key in ("lat", "lng"):
+                    if isinstance(mission_aircraft.get(key), (int, float)):
+                        mission_aircraft[key] = round(mission_aircraft[key], 7)
                 mission_state = {
                     key: data[key]
                     for key in (
-                        "updated_at", "flight_mode", "lte_rssi",
+                        "updated_at", "lat", "lng", "flight_mode", "lte_rssi",
                         "last_command", "aircraft_link",
                         "aircraft_tx_stage", "aircraft_tx_pending",
                         "aircraft_mission_status", "aircraft_fault_text",
@@ -140,6 +233,10 @@ def compact_json_bytes(data: dict[str, Any], max_bytes: int = 480) -> str:
                 "battery_percent": data.get("aircraft_battery_percent"),
                 "lat": data.get("aircraft_lat"),
                 "lng": data.get("aircraft_lng"),
+                "position_observed": data.get(
+                    "aircraft_position_observed",
+                    aircraft.get("position_observed"),
+                ),
                 "altitude": data.get("aircraft_altitude"),
                 "ground_speed": data.get("aircraft_ground_speed"),
                 "heading": data.get("aircraft_heading"),
@@ -168,13 +265,84 @@ def compact_json_bytes(data: dict[str, Any], max_bytes: int = 480) -> str:
                 key: data[key]
                 for key in (
                     "updated_at", "lat", "lng", "ground_speed", "heading",
+                    "position_observed",
                     "battery_percent", "armed", "flight_mode", "lte_rssi",
                     "last_command", "aircraft_link",
                 )
                 if key in data
+                and (key != "position_observed" or data[key] is True)
             }
             essential["aircraft"] = essential_aircraft
             text = dump(essential)
+            if len(text.encode("utf-8")) <= max_bytes:
+                return text
+
+            # A command receipt plus two observed 0,0 positions can push the
+            # otherwise useful state just over Tuya's 480-byte DP limit. Keep
+            # one real heartbeat and the aircraft status before expendable
+            # Rover controls so a successful command cannot blank telemetry.
+            live_aircraft = {
+                "link_active": aircraft.get("link_active"),
+                "mode": data.get("aircraft_mode"),
+                "armed": data.get("aircraft_armed"),
+                "battery_percent": data.get("aircraft_battery_percent"),
+                "lat": data.get("aircraft_lat", aircraft.get("lat")),
+                "lng": data.get("aircraft_lng", aircraft.get("lng")),
+                "position_observed": data.get(
+                    "aircraft_position_observed",
+                    aircraft.get("position_observed"),
+                ),
+                "altitude": data.get("aircraft_altitude"),
+                "ground_speed": data.get("aircraft_ground_speed"),
+                "heading": data.get("aircraft_heading"),
+                "messages": (
+                    [{
+                        "time": heartbeat.get("time"),
+                        "type": str(heartbeat.get("type", "HEARTBEAT"))[:16],
+                        "text": str(heartbeat.get("text", ""))[:64],
+                    }]
+                    if heartbeat
+                    else []
+                ),
+            }
+            for key in ("lat", "lng"):
+                if isinstance(live_aircraft.get(key), (int, float)):
+                    live_aircraft[key] = round(float(live_aircraft[key]), 5)
+            for key in ("altitude", "ground_speed", "heading"):
+                if isinstance(live_aircraft.get(key), (int, float)):
+                    live_aircraft[key] = round(float(live_aircraft[key]), 2)
+            live_aircraft = {
+                key: value
+                for key, value in live_aircraft.items()
+                if value is not None
+            }
+            live_state = {
+                "updated_at": data.get("updated_at"),
+                "lat": round(float(data.get("lat", 0.0)), 5),
+                "lng": round(float(data.get("lng", 0.0)), 5),
+                "position_observed": bool(data.get("position_observed", False)),
+                "flight_mode": data.get("flight_mode"),
+                "last_command": data.get("last_command"),
+                "aircraft_link": data.get("aircraft_link"),
+                "aircraft_command_event": data.get("aircraft_command_event"),
+                "aircraft": live_aircraft,
+            }
+            live_state = {
+                key: value
+                for key, value in live_state.items()
+                if value not in (None, "")
+            }
+            for container, key in (
+                (live_state, "aircraft_command_event"),
+                (live_aircraft, "ground_speed"),
+                (live_aircraft, "battery_percent"),
+                (live_state, "flight_mode"),
+            ):
+                text = dump(live_state)
+                if len(text.encode("utf-8")) <= max_bytes:
+                    return text
+                container.pop(key, None)
+            text = dump(live_state)
             if len(text.encode("utf-8")) <= max_bytes:
                 return text
 
@@ -227,6 +395,7 @@ def compact_json_bytes(data: dict[str, Any], max_bytes: int = 480) -> str:
         "updated_at",
         "lat",
         "lng",
+        "position_observed",
         "altitude",
         "ground_speed",
         "heading",
@@ -262,6 +431,7 @@ def compact_json_bytes(data: dict[str, Any], max_bytes: int = 480) -> str:
         "aircraft_battery_percent",
         "aircraft_lat",
         "aircraft_lng",
+        "aircraft_position_observed",
         "aircraft_altitude",
         "aircraft_ground_speed",
         "aircraft_heading",
@@ -304,6 +474,7 @@ def compact_json_bytes(data: dict[str, Any], max_bytes: int = 480) -> str:
         "updated_at",
         "lat",
         "lng",
+        "position_observed",
         "ground_speed",
         "heading",
         "battery_percent",
@@ -324,6 +495,7 @@ def compact_json_bytes(data: dict[str, Any], max_bytes: int = 480) -> str:
 class RoverTelemetry:
     lat: float = 32.119740
     lng: float = 118.953140
+    position_observed: bool = False
     altitude: float = 0.0
     ground_speed: float = 0.0
     heading: int = 0
@@ -372,6 +544,7 @@ class RoverTelemetry:
             "updated_at": round(time.time(), 3),
             "lat": round(float(self.lat), 7),
             "lng": round(float(self.lng), 7),
+            "position_observed": bool(self.position_observed),
             "altitude": round(float(self.altitude), 2),
             "ground_speed": round(float(self.ground_speed), 2),
             "heading": int(self.heading) % 360,

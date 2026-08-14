@@ -7,6 +7,7 @@ const {
   filterCommandProperties,
   isAircraftCommand,
   normalizeCloudState,
+  validCoordinate,
 } = require("./public/core.js");
 
 const PORT = Number(process.env.PORT || 5178);
@@ -21,6 +22,19 @@ const PUBLIC_DIR = path.join(__dirname, "public");
 let cachedToken = null;
 let lastState = null;
 let fakeRevision = 0;
+let cloudStateReader = null;
+
+const STATE_CACHE_TTL_MS = Number(process.env.TUYA_STATE_CACHE_MS || 2000);
+const STATE_ENDPOINTS = [
+  {
+    path: `/v2.0/cloud/thing/${DEVICE_ID}/shadow/properties`,
+    pick: (doc) => doc.result && doc.result.properties,
+  },
+  {
+    path: `/v2.0/cloud/thing/${DEVICE_ID}/state`,
+    pick: (doc) => doc.result && (doc.result.properties || doc.result.status || doc.result),
+  },
+];
 
 function sha256(value) {
   return crypto.createHash("sha256").update(value).digest("hex");
@@ -105,8 +119,8 @@ async function getToken() {
   return token;
 }
 
-function normalizeStatus(result) {
-  return normalizeCloudState(result);
+function normalizeStatus(result, receivedAtMs) {
+  return normalizeCloudState(result, receivedAtMs);
 }
 
 function preserveAircraftDetails(previous, next) {
@@ -121,10 +135,99 @@ function preserveAircraftDetails(previous, next) {
     || previous?.aircraft?.mode
     || (Array.isArray(previous?.aircraft?.messages) && previous.aircraft.messages.length),
   );
-  if (aircraftLinkActive && !nextHasDetails && previousHasDetails) {
-    return {...next, aircraft: previous.aircraft};
-  }
-  return next;
+  const merged = aircraftLinkActive && !nextHasDetails && previousHasDetails
+    ? {...next, aircraft: {...previous.aircraft}}
+    : {
+        ...next,
+        aircraft: next?.aircraft ? {...next.aircraft} : next?.aircraft,
+      };
+
+  const retainPosition = (previousValue, nextValue) => {
+    if (nextValue?.position_observed === true) return nextValue;
+    const nextLat = Number(nextValue?.lat);
+    const nextLng = Number(nextValue?.lng);
+    if (validCoordinate(nextLat, nextLng)) return nextValue;
+    const previousLat = Number(previousValue?.lat);
+    const previousLng = Number(previousValue?.lng);
+    if (!validCoordinate(previousLat, previousLng)) return nextValue;
+    return {...nextValue, lat: previousLat, lng: previousLng};
+  };
+
+  merged.telemetry = retainPosition(previous?.telemetry, next?.telemetry || {});
+  merged.aircraft = retainPosition(previous?.aircraft, merged.aircraft || {});
+  return merged;
+}
+
+function createStateReader({
+  request,
+  normalize = normalizeStatus,
+  preserve = preserveAircraftDetails,
+  endpoints = STATE_ENDPOINTS,
+  cacheTtlMs = STATE_CACHE_TTL_MS,
+  now = Date.now,
+} = {}) {
+  let cachedState = null;
+  let cachedResult = null;
+  let lastAttemptAt = Number.NEGATIVE_INFINITY;
+  let inFlight = null;
+
+  const serve = (state) => {
+    const served = {...state, telemetry: {...(state?.telemetry || {})}};
+    const updatedAt = Number(served.telemetry.updated_at || 0);
+    served.state_age_sec = updatedAt > 0
+      ? Math.max(0, now() / 1000 - updatedAt)
+      : null;
+    served.state_fresh = served.state_age_sec !== null && served.state_age_sec <= 8;
+    return served;
+  };
+
+  const load = async () => {
+    const errors = [];
+    for (const endpoint of endpoints) {
+      try {
+        const doc = await request(endpoint.path);
+        const picked = endpoint.pick(doc);
+        if (picked === null || picked === undefined) {
+          throw new Error("Tuya state response has no properties");
+        }
+        const state = normalize(picked, now());
+        state.source = endpoint.path;
+        state.cloud_degraded = false;
+        delete state.cloud_error;
+        cachedState = preserve(cachedState, state);
+        cachedResult = cachedState;
+        return serve(cachedResult);
+      } catch (err) {
+        errors.push({path: endpoint.path, error: err.message, detail: err.response || null});
+      }
+    }
+
+    if (cachedState) {
+      cachedResult = {
+        ...cachedState,
+        cloud_degraded: true,
+        cloud_error: errors.map((item) => item.error).filter(Boolean).join("; "),
+      };
+      return serve(cachedResult);
+    }
+
+    const err = new Error("所有涂鸦状态接口都返回失败");
+    err.response = errors;
+    throw err;
+  };
+
+  return async function readState() {
+    const current = now();
+    if (cachedResult && current - lastAttemptAt < cacheTtlMs) {
+      return serve(cachedResult);
+    }
+    if (inFlight) return inFlight;
+    lastAttemptAt = current;
+    inFlight = load().finally(() => {
+      inFlight = null;
+    });
+    return inFlight;
+  };
 }
 
 async function fetchState() {
@@ -132,47 +235,23 @@ async function fetchState() {
     lastState = fakeState();
     return lastState;
   }
-  const endpoints = [
-    {
-      path: `/v2.0/cloud/thing/${DEVICE_ID}/shadow/properties`,
-      pick: (doc) => doc.result && doc.result.properties,
-    },
-    {
-      path: `/v2.0/cloud/thing/${DEVICE_ID}/state`,
-      pick: (doc) => doc.result && (doc.result.properties || doc.result.status || doc.result),
-    },
-    {
-      path: `/v1.0/iot-03/devices/${DEVICE_ID}/status`,
-      pick: (doc) => doc.result,
-    },
-  ];
-
-  const errors = [];
-  const states = [];
-  for (const endpoint of endpoints) {
-    try {
-      const doc = await tuyaRequestWithToken("GET", endpoint.path, null);
-      const state = normalizeStatus(endpoint.pick(doc));
-      state.source = endpoint.path;
-      states.push(state);
-    } catch (err) {
-      errors.push({path: endpoint.path, error: err.message, detail: err.response || null});
-    }
-  }
-
-  if (states.length) {
-    states.sort((left, right) => {
-      const leftTime = Number(left?.telemetry?.updated_at || 0);
-      const rightTime = Number(right?.telemetry?.updated_at || 0);
-      return rightTime - leftTime;
+  if (!cloudStateReader) {
+    cloudStateReader = createStateReader({
+      request: (urlPath) => tuyaRequestWithToken("GET", urlPath, null),
     });
-    lastState = preserveAircraftDetails(lastState, states[0]);
-    return lastState;
   }
+  lastState = await cloudStateReader();
+  return lastState;
+}
 
-  const err = new Error("所有涂鸦状态接口都返回失败");
-  err.response = errors;
-  throw err;
+function buildIssueBody(properties) {
+  return {properties: JSON.stringify(properties)};
+}
+
+function buildCommandsBody(properties) {
+  return {
+    commands: Object.entries(properties).map(([code, value]) => ({code, value})),
+  };
 }
 
 async function sendCommand(command) {
@@ -235,7 +314,11 @@ async function sendCommand(command) {
     fakeRevision += 1;
     return {success: true, fake: true, revision: fakeRevision, properties};
   }
-  return tuyaRequestWithToken("POST", `/v2.0/cloud/thing/${DEVICE_ID}/shadow/properties/issue`, {properties});
+  return tuyaRequestWithToken(
+    "POST",
+    `/v1.0/iot-03/devices/${DEVICE_ID}/commands`,
+    buildCommandsBody(properties),
+  );
 }
 
 function fakeState() {
@@ -399,6 +482,9 @@ function startServer() {
 if (require.main === module) startServer();
 
 module.exports = {
+  buildCommandsBody,
+  buildIssueBody,
+  createStateReader,
   createServer,
   fetchState,
   normalizeStatus,

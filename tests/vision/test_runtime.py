@@ -2,6 +2,7 @@ import unittest
 
 from vision.runtime import (
     OpticalStatePublisher,
+    activate_autopilot_heartbeat,
     build_preview_label,
     camera_candidates,
     is_autopilot_heartbeat,
@@ -10,6 +11,7 @@ from vision.runtime import (
     reopen_camera,
     request_vision_messages,
     send_target_status_text,
+    wait_for_autopilot_heartbeat,
 )
 
 
@@ -142,12 +144,20 @@ class CameraRecoveryTests(unittest.TestCase):
 
 
 class FakeMessage:
-    def __init__(self, *, vehicle_type, autopilot):
+    def __init__(self, *, vehicle_type, autopilot, system=1, component=1):
         self.type = vehicle_type
         self.autopilot = autopilot
+        self.system = system
+        self.component = component
 
     def get_type(self):
         return "HEARTBEAT"
+
+    def get_srcSystem(self):
+        return self.system
+
+    def get_srcComponent(self):
+        return self.component
 
 
 class FakeMav:
@@ -169,7 +179,39 @@ class FakeMaster:
         self.mav = FakeMav()
 
 
+class SilentMaster(FakeMaster):
+    def recv_match(self, **_kwargs):
+        return None
+
+
 class MavlinkSetupTests(unittest.TestCase):
+    def test_missing_startup_heartbeat_can_leave_runtime_waiting(self):
+        master = SilentMaster()
+
+        heartbeat = wait_for_autopilot_heartbeat(
+            master,
+            timeout=0,
+            required=False,
+        )
+
+        self.assertIsNone(heartbeat)
+
+    def test_late_autopilot_heartbeat_initializes_targets_and_streams(self):
+        master = FakeMaster()
+        heartbeat = FakeMessage(
+            vehicle_type=2,
+            autopilot=3,
+            system=7,
+            component=4,
+        )
+
+        activated = activate_autopilot_heartbeat(master, heartbeat)
+
+        self.assertTrue(activated)
+        self.assertEqual(master.target_system, 7)
+        self.assertEqual(master.target_component, 4)
+        self.assertEqual(len(master.mav.calls), 3)
+
     def test_gcs_heartbeat_cannot_replace_flight_controller_mode(self):
         self.assertFalse(is_autopilot_heartbeat(
             FakeMessage(vehicle_type=6, autopilot=8),

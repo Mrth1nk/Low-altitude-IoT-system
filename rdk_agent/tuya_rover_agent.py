@@ -209,6 +209,7 @@ def read_aircraft_summary(path: Path = AIRCRAFT_STATE_PATH, transport_status=Non
         "mission_status": (
             f"seq={mission['seq']}" if "seq" in mission else None
         ),
+        "position_observed": bool(position),
     }
     return {
         "aircraft": {

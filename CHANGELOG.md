@@ -1,5 +1,85 @@
 # CHANGELOG.md
 
+## 2026-08-06
+
+- Added a configurable precision-landing final-descent cutoff at 0.25 m.
+  Once entered in `LAND`/`QLAND`, the vision service stops sending new
+  `LANDING_TARGET` corrections until the aircraft leaves the landing mode.
+- Preserved GUIDED infrared tracking and ignored zero or unknown altitude so
+  indoor startup cannot accidentally enter final descent.
+- Read the flight controller without changing parameters: `PLND_ALT_MIN=0.75`
+  and `PLND_STRICT=1` keep target loss at 0.25 m in the vertical-descent zone.
+- Created Git restore tag `vision-working-before-final-descent-20260806` and
+  deployed with an ELF backup at
+  `/home/elf/vision-backups/20260806-105025`.
+- Fixed Rover mission execution readiness becoming stale after an indoor
+  upload. `AUTO` now refreshes Home, GPS, EKF, and telemetry freshness at the
+  moment the command is received.
+- Changed Rover `AUTO` to use the existing heartbeat-confirmed mode switch and
+  report the last observed flight-controller mode when confirmation fails.
+- Added explicit `mission re-upload required before AUTO` reporting after an
+  agent restart instead of silently remaining in `HOLD`.
+- Preserved real flight-controller `0,0` coordinates for indoor diagnostics by
+  reporting a separate `position_observed` flag. The map and mission planner
+  still reject `0,0` as a navigation coordinate.
+- Kept both observed Rover and aircraft positions plus Rover AUTO failure
+  details in the 480-byte Tuya compact state.
+- Deployed only the four affected RDK agent modules to
+  `/opt/low-altitude-iot/current/rdk_agent`, restarted only
+  `low-altitude-rdk.service`, and confirmed zero automatic restarts.
+- Verified the real Tuya command path indoors: an `AUTO` request reached the
+  RDK and returned GPS fix `1`, zero satellites, and the explicit mission
+  re-upload requirement while the Rover remained safely in `HOLD`.
+- Restarted the local Tuya ground station and confirmed both vehicles display
+  their real observed `0,0` coordinates instead of cached outdoor positions.
+- Fixed a 480-byte compact-state regression where an accepted aircraft command
+  could evict the nested aircraft heartbeat. Live aircraft mode, armed state,
+  position, altitude, heading, and one heartbeat now take priority over
+  expendable Rover control fields.
+- Switched the RDK to `woshinailong` through Tuya and verified that an accepted
+  `aircraft_guided` command no longer interrupts subsequent aircraft
+  heartbeats or causes a false optical-blocked display.
+
+## 2026-08-05
+
+- Corrected GUIDED infrared tracking for the forward-mounted camera:
+  - image-up now commands positive aircraft-forward velocity;
+  - image-down commands reverse velocity;
+  - image-left/right retain matching body-right signs.
+- Added altitude-aware compensation for the camera mounted 4 cm forward and
+  1 cm right of the aircraft origin. Unknown or zero altitude safely falls
+  back to the geometric image center.
+- Deployed only `vision/guided_tracker.py` and `vision/mode_controller.py` to
+  ELF, restarted only `low-altitude-vision.service`, and created a reversible
+  backup at `/home/elf/vision-backups/20260805-184055`.
+- Verified the deployed service remained active with zero restarts, local and
+  remote hashes matched, and live GUIDED transmit counters continued rising.
+- Fixed intermittent local ground-station disconnects caused by excessive
+  Tuya state API reads.
+- Replaced three unconditional state calls per refresh with a primary-first,
+  fallback-on-error reader cached for two seconds.
+- Coalesced concurrent state reads and retained the last successful state
+  during transient Tuya `server busy` responses while preserving normal stale
+  telemetry detection.
+- Removed the permanently unauthorized legacy v1 status endpoint from the
+  state-read path.
+- Left Tuya command issue requests uncached and unchanged.
+
+## 2026-08-04
+
+- Fixed intermittent Rover and aircraft marker disappearance when Tuya returned
+  partial mission frames or temporary no-fix coordinates.
+- Preserved both vehicle coordinates in compact Rover mission-state reports
+  while remaining below the Tuya 480-byte payload limit.
+- Changed Rover mode control to wait for flight-controller `HEARTBEAT`
+  confirmation and report the observed mode on failure.
+- Blocked Rover `AUTO` unless the current session has a verified,
+  execution-ready mission.
+- Deployed the updated RDK agent without rebooting the board and restarted the
+  local ground station on `127.0.0.1:5178`.
+- Verified a real `HOLD` command through the full Tuya path and confirmed that
+  indoor non-ready `AUTO` is rejected without changing the flight mode.
+
 ## 2026-07-26
 
 - Restored aircraft GUIDED infrared tracking to the proven reference control

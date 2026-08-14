@@ -10,6 +10,7 @@ const {
   prepareAircraftUploadRoute,
   routeSegmentDistances,
 } = require("../public/core.js");
+const {buildCommandsBody, buildIssueBody} = require("../server.js");
 
 const points = [
   {lat: 32.1197, lng: 118.9531, speed: 0.8},
@@ -188,6 +189,26 @@ test("server property filter emits only Tuya product DPs for simple commands", (
     "steering",
     "target_lat",
   ]);
+});
+
+test("Tuya send-property body serializes properties as the required JSON string", () => {
+  assert.deepEqual(
+    buildIssueBody({command: "disarm", steering: 0}),
+    {properties: "{\"command\":\"disarm\",\"steering\":0}"},
+  );
+});
+
+test("Tuya DP passthrough body converts every property into a device command", () => {
+  assert.deepEqual(
+    buildCommandsBody({command: "drive", steering: "120", throttle: "1650"}),
+    {
+      commands: [
+        {code: "command", value: "drive"},
+        {code: "steering", value: "120"},
+        {code: "throttle", value: "1650"},
+      ],
+    },
+  );
 });
 
 test("command filtering identifies every aircraft command including full missions", () => {

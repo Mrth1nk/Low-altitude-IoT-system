@@ -10,8 +10,14 @@ const {
   aircraftCommandsAllowed,
   aircraftHeartbeatSummary,
   normalizeCloudState,
+  formatObservedPosition,
   transactionTimeline,
 } = require("../public/core.js");
+
+test("formats observed zero position without making it navigable", () => {
+  assert.equal(formatObservedPosition({lat: 0, lng: 0, position_observed: true}), "0.00000, 0.00000");
+  assert.equal(formatObservedPosition({lat: 0, lng: 0, position_observed: false}), "-");
+});
 
 test("hidden UI states cannot be overridden by component display rules", () => {
   const css = fs.readFileSync(

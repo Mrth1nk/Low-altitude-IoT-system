@@ -54,7 +54,7 @@ def is_autopilot_heartbeat(message):
     )
 
 
-def wait_for_autopilot_heartbeat(master, timeout=10.0):
+def wait_for_autopilot_heartbeat(master, timeout=10.0, *, required=True):
     deadline = time.monotonic() + float(timeout)
     while time.monotonic() < deadline:
         message = master.recv_match(
@@ -67,7 +67,9 @@ def wait_for_autopilot_heartbeat(master, timeout=10.0):
         master.target_system = message.get_srcSystem()
         master.target_component = message.get_srcComponent()
         return message
-    raise TimeoutError("flight-controller heartbeat unavailable on vision UART")
+    if required:
+        raise TimeoutError("flight-controller heartbeat unavailable on vision UART")
+    return None
 
 
 def request_vision_messages(master, interval_us=100_000):
@@ -85,6 +87,15 @@ def request_vision_messages(master, interval_us=100_000):
             0,
             0,
         )
+
+
+def activate_autopilot_heartbeat(master, message):
+    if not is_autopilot_heartbeat(message):
+        return False
+    master.target_system = message.get_srcSystem()
+    master.target_component = message.get_srcComponent()
+    request_vision_messages(master)
+    return True
 
 
 def make_camera_capture(cv2_module, camera_device):
@@ -253,14 +264,6 @@ def run():
     runtime_dir = Path(os.environ.get("AIRCRAFT_RUNTIME_DIR", "/run/low-altitude-iot"))
     serial_path = os.environ.get("VISION_MAV_DEVICE", "/dev/ttyS9")
     camera_device = os.environ.get("VISION_CAMERA_DEVICE", "/dev/video0")
-    master = mavutil.mavlink_connection(
-        serial_path,
-        baud=int(os.environ.get("VISION_MAV_BAUD", "115200")),
-        autoreconnect=False,
-        source_system=254,
-    )
-    wait_for_autopilot_heartbeat(master, timeout=10)
-    request_vision_messages(master)
     capture_factory = lambda device: make_camera_capture(cv2, device)
     camera = reopen_camera(
         capture_factory,
@@ -271,6 +274,18 @@ def run():
         os.environ.get("VISION_STREAM_HOST", "0.0.0.0"),
         int(os.environ.get("VISION_STREAM_PORT", "8090")),
     )
+    master = mavutil.mavlink_connection(
+        serial_path,
+        baud=int(os.environ.get("VISION_MAV_BAUD", "115200")),
+        autoreconnect=False,
+        source_system=254,
+    )
+    heartbeat = wait_for_autopilot_heartbeat(
+        master,
+        timeout=10,
+        required=False,
+    )
+    fc_connected = activate_autopilot_heartbeat(master, heartbeat)
 
     detector_config = DetectorConfig(
         threshold=int(os.environ.get("IR_THRESHOLD", "235")),
@@ -348,6 +363,8 @@ def run():
             while message is not None:
                 kind = message.get_type()
                 if kind == "HEARTBEAT" and is_autopilot_heartbeat(message):
+                    if not fc_connected:
+                        fc_connected = activate_autopilot_heartbeat(master, message)
                     mode = mavutil.mode_string_v10(message)
                 elif kind == "DISTANCE_SENSOR" and int(message.current) > 0:
                     altitude_m = float(message.current) / 100.0
@@ -407,7 +424,7 @@ def run():
                 timestamp=now,
                 now=now,
             )
-            if output.optical.locked != last_announced_lock:
+            if fc_connected and output.optical.locked != last_announced_lock:
                 send_target_status_text(
                     master,
                     locked=output.optical.locked,
@@ -419,7 +436,7 @@ def run():
                     else "IR TARGET LOST"
                 )
                 status_text_tx_count += 1
-            if output.correction is not None:
+            if fc_connected and output.correction is not None:
                 if not guided_tracking_announced:
                     send_guided_tracking_active_text(master)
                     last_status_text = "IR TRACKING ACTIVE"
@@ -437,7 +454,7 @@ def run():
             else:
                 if control_mode.strip().upper() != "GUIDED" or not output.optical.locked:
                     guided_tracking_announced = False
-            if output.landing_target is not None:
+            if fc_connected and output.landing_target is not None:
                 send_landing_target(master.mav, output.landing_target)
                 landing_tx_count += 1
                 last_landing_control = {
@@ -481,6 +498,7 @@ def run():
                 force_guided_tracking=force_guided_tracking,
                 altitude_m=altitude_m,
                 altitude_source=altitude_source,
+                fc_connected=fc_connected,
                 guided_tx_count=guided_tx_count,
                 landing_tx_count=landing_tx_count,
                 final_descent_active=output.final_descent_active,

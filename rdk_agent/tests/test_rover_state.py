@@ -53,6 +53,65 @@ class RoverStateTests(unittest.TestCase):
         )
         self.assertEqual(payload["data"]["steering"]["value"], "12")
 
+    def test_position_observation_distinguishes_real_zero_from_no_frame(self):
+        telemetry = RoverTelemetry(lat=0.0, lng=0.0)
+        self.assertFalse(telemetry.data()["position_observed"])
+
+        telemetry.position_observed = True
+        data = telemetry.data()
+
+        self.assertTrue(data["position_observed"])
+        self.assertEqual((data["lat"], data["lng"]), (0.0, 0.0))
+
+    def test_compact_state_keeps_both_observed_positions_and_auto_fault(self):
+        telemetry = RoverTelemetry(
+            lat=0.0,
+            lng=0.0,
+            position_observed=True,
+            flight_mode="hold",
+            gps_fix_type=1,
+            satellites_visible=0,
+            mission_status="command_failed",
+            fault_text="AUTO blocked: missing GPS fix, satellites, location, Home, EKF",
+            rover_transaction_stage="failed",
+            rover_transaction_id="r" * 64,
+            last_command="auto",
+        )
+        state = telemetry.data()
+        state.update({
+            "aircraft_link": True,
+            "aircraft_mode": "LOITER",
+            "aircraft_armed": False,
+            "aircraft_lat": 0.0,
+            "aircraft_lng": 0.0,
+            "aircraft_position_observed": True,
+            "aircraft": {
+                "link_active": True,
+                "position_observed": True,
+                "lat": 0.0,
+                "lng": 0.0,
+                "messages": [{
+                    "time": 1786000000.12,
+                    "type": "HEARTBEAT",
+                    "text": "LOITER armed=NO",
+                }],
+            },
+        })
+
+        encoded = compact_json_bytes(state)
+        payload = json.loads(encoded)
+
+        self.assertLessEqual(len(encoded.encode("utf-8")), 480)
+        self.assertTrue(payload["position_observed"])
+        self.assertEqual((payload["lat"], payload["lng"]), (0.0, 0.0))
+        self.assertTrue(payload["aircraft"]["position_observed"])
+        self.assertEqual(
+            (payload["aircraft"]["lat"], payload["aircraft"]["lng"]),
+            (0.0, 0.0),
+        )
+        self.assertEqual(payload["rover_tx_stage"], "failed")
+        self.assertIn("GPS", payload["fault_text"])
+
     def test_compact_json_keeps_aircraft_message_text_readable(self):
         text = "心跳 GUIDED armed=NO sys=1/1"
         state = RoverTelemetry(
@@ -198,8 +257,59 @@ class RoverStateTests(unittest.TestCase):
         self.assertEqual(payload["aircraft"]["lat"], 32.11961)
         self.assertEqual(payload["aircraft"]["lng"], 118.95847)
 
+    def test_aircraft_command_receipt_keeps_live_heartbeat_with_zero_positions(self):
+        state = RoverTelemetry(
+            lat=0.0,
+            lng=0.0,
+            position_observed=True,
+            heading=272,
+            flight_mode="hold",
+            lte_rssi=-61,
+            fc_link=True,
+            last_command="aircraft_guided",
+            aircraft_command_event="accepted",
+            aircraft_command_event_id="a" * 36,
+        ).data()
+        state.update({
+            "aircraft_link": True,
+            "aircraft_mode": "GUIDED",
+            "aircraft_armed": False,
+            "aircraft_battery_percent": 100,
+            "aircraft_lat": 0.0,
+            "aircraft_lng": 0.0,
+            "aircraft_position_observed": True,
+            "aircraft_altitude": 1.92,
+            "aircraft_ground_speed": 0.0,
+            "aircraft_heading": 175.23,
+            "aircraft": {
+                "link_active": True,
+                "last_seen_age_sec": 0.2,
+                "position_observed": True,
+                "messages": [{
+                    "time": 1786005301.562,
+                    "type": "HEARTBEAT",
+                    "text": "HEARTBEAT GUIDED armed=NO",
+                }],
+            },
+        })
+
+        encoded = compact_json_bytes(state)
+        payload = json.loads(encoded)
+
+        self.assertLessEqual(len(encoded.encode("utf-8")), 480)
+        self.assertTrue(payload["aircraft"]["link_active"])
+        self.assertEqual(payload["aircraft"]["mode"], "GUIDED")
+        self.assertIs(payload["aircraft"]["armed"], False)
+        self.assertEqual(payload["aircraft"]["lat"], 0.0)
+        self.assertTrue(payload["aircraft"]["position_observed"])
+        self.assertEqual(
+            payload["aircraft"]["messages"][0]["type"], "HEARTBEAT"
+        )
+
     def test_aircraft_mission_transaction_survives_compact_cloud_state(self):
         state = RoverTelemetry(
+            lat=32.11974,
+            lng=118.95314,
             last_command="aircraft_mission_commit",
             aircraft_transaction_stage="VERIFIED",
             aircraft_transaction_id="a" * 64,
@@ -210,10 +320,14 @@ class RoverStateTests(unittest.TestCase):
             "aircraft_link": True,
             "aircraft_mode": "GUIDED",
             "aircraft_armed": False,
+            "aircraft_lat": 32.11981,
+            "aircraft_lng": 118.95322,
             "aircraft_altitude": 5.3,
             "aircraft_heading": 181.96,
             "aircraft": {
                 "link_active": True,
+                "lat": 32.11981,
+                "lng": 118.95322,
                 "messages": [{
                     "time": 1784963000.1,
                     "type": "HEARTBEAT",
@@ -229,6 +343,10 @@ class RoverStateTests(unittest.TestCase):
         self.assertEqual(payload["aircraft_tx_stage"], "VERIFIED")
         self.assertEqual(payload["aircraft_tx_pending"], 0)
         self.assertEqual(payload["aircraft_mission_status"], "execution_ready")
+        self.assertEqual(payload["lat"], 32.11974)
+        self.assertEqual(payload["lng"], 118.95314)
+        self.assertEqual(payload["aircraft"]["lat"], 32.11981)
+        self.assertEqual(payload["aircraft"]["lng"], 118.95322)
         self.assertEqual(payload["aircraft"]["altitude"], 5.3)
         self.assertEqual(payload["aircraft"]["heading"], 181.96)
 

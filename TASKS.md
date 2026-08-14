@@ -1,5 +1,116 @@
 # TASKS.md
 
+## 2026-08-06 Precision Landing Final Descent
+
+### Completed
+
+- Preserved the proven vision version with a Git tag and an aircraft-side
+  backup before changing flight behavior.
+- Stopped new precision-landing corrections at and below 0.25 m while keeping
+  camera detection, optical-link state, telemetry, and downward landing active.
+- Latched final descent until leaving `LAND`/`QLAND` so noisy altitude cannot
+  re-enable horizontal corrections near the ground.
+- Confirmed GUIDED infrared tracking remains unchanged.
+- Deployed without rebooting the board or modifying flight-controller
+  parameters; verified the live service, camera preview, UART ownership, and
+  final-descent diagnostics.
+
+### Remaining
+
+1. Perform one supervised low-altitude landing over the lamp board and confirm
+   that horizontal correction stops near 25 cm before touchdown.
+2. If the physical cutoff is consistently early or late, adjust only
+   `PLND_FINAL_DESCENT_ALT_M` in the vision service and retest in small steps.
+
+## 2026-08-06 Rover AUTO And Raw Position
+
+### Completed
+
+- Recomputed Rover navigation readiness when `AUTO` is requested instead of
+  trusting readiness captured during mission upload.
+- Required flight-controller heartbeat confirmation before reporting Rover
+  `AUTO` success.
+- Added clear mission re-upload, GPS, Home, EKF, and stale-telemetry failure
+  reporting through Tuya compact state.
+- Made real indoor `0,0` coordinates visible for both vehicles without using
+  them as map or mission coordinates.
+- Deployed and verified the updated RDK service without changing the aircraft
+  link, vision services, flight-controller parameters, or board power state.
+- Verified the local ground station reads the new cloud state and no longer
+  retains stale outdoor coordinates over observed `0,0` frames.
+- Preserved live aircraft heartbeat details after aircraft command receipts,
+  then verified the complete Tuya-to-RDK-to-aircraft path on `woshinailong`.
+
+### Remaining
+
+1. Outdoors, wait for a valid Rover GPS fix, Home, and EKF/navigation state.
+2. Upload the intended Rover route again after the latest service restart and
+   wait for the mission to report verified and ready.
+3. Arm under supervision, select `AUTO`, and confirm the mode changes to
+   `AUTO` and the Rover advances through the uploaded mission items.
+
+## 2026-08-05 GUIDED Camera Alignment
+
+### Completed
+
+- Matched GUIDED pixel axes to the forward camera installation: image-up is
+  aircraft-forward and image-right is aircraft-right.
+- Applied the measured 4 cm forward / 1 cm right camera displacement whenever
+  a valid positive altitude is available.
+- Preserved the center-target fallback for indoor or otherwise unavailable
+  altitude data.
+- Deployed the two affected vision modules to ELF without rebooting the board
+  or changing flight-controller parameters.
+- Verified live `GUIDED + locked` operation and continuous correction-frame
+  transmission on the deployed service.
+
+### Remaining
+
+1. Perform a supervised low-altitude hover test and confirm that deliberate
+   fore/aft and left/right beacon offsets converge toward the lamp board.
+2. Fine-tune gains only if the physical response oscillates or converges too
+   slowly; do not change axis signs during gain tuning.
+
+## 2026-08-05 Tuya State Read Stability
+
+### Completed
+
+- Reproduced intermittent ground-station disconnects as Tuya OpenAPI
+  `code=500 server busy`, while RDK MQTT reporting remained healthy.
+- Reduced normal state reads from three cloud endpoints per browser refresh to
+  one primary endpoint every two seconds.
+- Added ordered fallback, in-flight request sharing, and last-known-state
+  serving for transient cloud failures.
+- Kept command issue requests uncached and independent from state-read caching.
+
+### Remaining
+
+1. Monitor the Tuya project API quota during the next full demonstration.
+
+## 2026-08-04 Rover Position And AUTO Reliability
+
+### Completed
+
+- Preserved the last valid Rover and aircraft coordinates across partial and
+  no-fix Tuya cloud updates without reusing stale mode or mission status.
+- Kept both vehicle coordinates in the 480-byte Rover mission transaction
+  payload.
+- Required Rover mode changes to be confirmed by a matching flight-controller
+  heartbeat instead of reporting success immediately after transmission.
+- Required a verified, execution-ready Rover mission before entering `AUTO`.
+- Deployed the RDK changes without rebooting and restarted the local Tuya cloud
+  ground station.
+- Verified the real cloud-to-RDK-to-flight-controller `HOLD` path and confirmed
+  that a non-ready `AUTO` request is rejected while the controller stays in
+  `HOLD`.
+
+### Remaining
+
+1. Outdoors, acquire a valid Rover GPS/Home/EKF solution.
+2. Upload the intended route and wait for the ground station to show verified
+   and ready.
+3. Arm under supervision, select `AUTO`, and verify route execution.
+
 ## 2026-07-26 Vision Recovery
 
 ### Completed

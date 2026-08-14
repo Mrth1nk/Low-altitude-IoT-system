@@ -19,6 +19,7 @@ Restart=on-failure
 RestartSec=2
 StateDirectory=low-altitude-iot
 RuntimeDirectory=low-altitude-iot
+RuntimeDirectoryPreserve=yes
 UMask=0077
 DevicePolicy=closed
 DeviceAllow=/dev/ttyACM0 rw

@@ -165,6 +165,7 @@ class RoverMavlink:
             elif typ == "GLOBAL_POSITION_INT":
                 telemetry.lat = msg.lat / 1e7
                 telemetry.lng = msg.lon / 1e7
+                telemetry.position_observed = True
                 telemetry.altitude = msg.relative_alt / 1000.0
                 telemetry.heading = int((msg.hdg or 0) / 100)
                 telemetry.position_generation = self.connection_generation
@@ -238,10 +239,32 @@ class RoverMavlink:
                 self.manual(command.steering, command.throttle)
                 return True, "manual control sent"
             if cmd in ("guided", "auto", "hold"):
-                if cmd == "auto" and self.mission_manager is not None:
-                    self.mission_manager.start_auto()
-                    return True, "verified mission AUTO started"
+                if cmd == "auto":
+                    manager = self.mission_manager
+                    if (
+                        manager is None
+                        or not manager.status.verified
+                        or not manager.executable_items
+                    ):
+                        return False, "mission re-upload required before AUTO"
+                    transport = manager.transport
+                    self.home_valid = bool(
+                        transport.refresh_home(self.home_valid, 1.0)
+                    )
+                    transport.sync_navigation(telemetry)
+                    ready, reason = manager.refresh_execution_readiness(
+                        telemetry,
+                        self.home_valid,
+                    )
+                    if not ready:
+                        return False, f"AUTO blocked: {reason}"
+                    self.set_mode("AUTO", timeout=2.5)
+                    manager.status.completed = False
+                    telemetry.flight_mode = "auto"
+                    telemetry.control_mode = "auto"
+                    return True, "verified mission AUTO confirmed"
                 self.set_mode(cmd.upper())
+                telemetry.flight_mode = cmd
                 return True, f"mode {cmd} sent"
             if cmd == "mission":
                 return False, "mission requires full mission payload"
@@ -305,12 +328,38 @@ class RoverMavlink:
         self.stop()
         return ok, detail
 
-    def set_mode(self, mode: str) -> None:
+    def set_mode(self, mode: str, timeout: float = 2.5) -> str:
         with self.session_lock:
+            requested = str(mode).strip().upper()
             mapping = self.conn.mode_mapping() or {}
-            if mode not in mapping:
-                raise RuntimeError(f"mode not available: {mode}")
-            self.conn.set_mode(mapping[mode])
+            if requested not in mapping:
+                raise RuntimeError(f"mode not available: {requested}")
+            self.conn.set_mode(mapping[requested])
+
+            deadline = time.monotonic() + max(0.01, float(timeout))
+            observed = "UNKNOWN"
+            while time.monotonic() < deadline:
+                remaining = max(0.0, deadline - time.monotonic())
+                heartbeat = self.conn.recv_match(
+                    type="HEARTBEAT",
+                    blocking=True,
+                    timeout=remaining,
+                )
+                if heartbeat is None:
+                    break
+                source = getattr(heartbeat, "get_srcSystem", lambda: 0)() or 0
+                if source and int(source) != int(self.target_system):
+                    continue
+                self.last_heartbeat = time.time()
+                try:
+                    observed = str(mavutil.mode_string_v10(heartbeat)).upper()
+                except Exception:
+                    observed = str(getattr(heartbeat, "custom_mode", "UNKNOWN"))
+                if observed == requested:
+                    return observed
+            raise RuntimeError(
+                f"mode {requested} not confirmed; flight controller reports {observed}"
+            )
 
     def stop(self) -> None:
         with self.session_lock:
@@ -671,6 +720,7 @@ class RoverMavlinkTransport:
         if kind == "GLOBAL_POSITION_INT" and telemetry is not None:
             telemetry.lat = float(_message_field(message, "lat", 0) or 0) / 1e7
             telemetry.lng = float(_message_field(message, "lon", 0) or 0) / 1e7
+            telemetry.position_observed = True
             telemetry.position_generation = self.rover.connection_generation
             telemetry.position_updated_monotonic = now
             return

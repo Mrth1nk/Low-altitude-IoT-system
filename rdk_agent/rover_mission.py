@@ -456,6 +456,27 @@ class RoverMissionManager:
         self.status.completed = False
         self.transport.send("SET_MODE", mode="AUTO")
 
+    def refresh_execution_readiness(
+        self,
+        telemetry,
+        home_valid: bool,
+        *,
+        now: float | None = None,
+    ) -> tuple[bool, str]:
+        if self.status.residual_unsafe:
+            raise RuntimeError("unsafe residual mission blocks AUTO")
+        if not self.status.verified or not self.executable_items:
+            raise RuntimeError("mission re-upload required")
+        ready, reason = self._execution_gate(
+            telemetry,
+            home_valid,
+            now=self.clock() if now is None else float(now),
+            freshness=self.navigation_freshness,
+        )
+        self.status.execution_ready = ready
+        self.status.reason = reason
+        return ready, reason
+
     def observe(self, message) -> None:
         kind = _field(message, "type", "")
         if kind == "MISSION_CURRENT":

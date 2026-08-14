@@ -554,6 +554,51 @@ class RoverMissionManagerTests(unittest.TestCase):
             manager.start_auto()
         self.assertNotIn(("SET_MODE", {"mode": "AUTO"}), transport.sent)
 
+    def test_verified_mission_can_refresh_execution_readiness_before_auto(self):
+        manager = RoverMissionManager(FakeTransport(), navigation_freshness=3)
+        manager.status.verified = True
+        manager.status.execution_ready = False
+        manager.status.reason = "missing GPS fix"
+        manager.executable_items = mission_items()
+        telemetry = ready_telemetry()
+        telemetry.connection_generation = 2
+        telemetry.gps_generation = 2
+        telemetry.position_generation = 2
+        telemetry.ekf_generation = 2
+        telemetry.home_generation = 2
+        telemetry.gps_updated_monotonic = 99.0
+        telemetry.position_updated_monotonic = 99.0
+        telemetry.ekf_updated_monotonic = 99.0
+        telemetry.home_updated_monotonic = 99.0
+
+        ready, reason = manager.refresh_execution_readiness(
+            telemetry,
+            home_valid=True,
+            now=100.0,
+        )
+
+        self.assertTrue(ready, reason)
+        self.assertTrue(manager.status.execution_ready)
+        self.assertEqual(manager.status.reason, "")
+
+    def test_auto_confirmation_failure_is_not_reported_as_started(self):
+        class RejectingModeTransport(FakeTransport):
+            def send(self, message_type, **fields):
+                super().send(message_type, **fields)
+                if message_type == "SET_MODE":
+                    raise RuntimeError("mode AUTO not confirmed; flight controller reports HOLD")
+
+        transport = RejectingModeTransport(fixture_messages())
+        manager = RoverMissionManager(transport, timeout=0.01, retries=1)
+        manager.upload_and_verify(
+            mission_items(), ready_telemetry(), home_valid=True
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "AUTO.*HOLD"):
+            manager.start_auto()
+
+        self.assertFalse(manager.status.completed)
+
     def test_final_reached_is_provisional_and_does_not_override_mis_done_behavior(self):
         transport = FakeTransport(fixture_messages())
         manager = RoverMissionManager(transport, timeout=0.01, retries=1)
