@@ -7,7 +7,6 @@ const els = {
   aircraftGrid: $("aircraftGrid"),
   aircraftMessages: $("aircraftMessages"),
   aircraftMode: $("aircraftWaypointMode"),
-  aircraftTimeline: $("aircraftTimeline"),
   aircraftPanelTitle: $("aircraftPanelTitle"),
   altitude: $("altitudeInput"),
   arrivalModal: $("arrivalModal"),
@@ -26,7 +25,6 @@ const els = {
   queueSummary: $("queueSummary"),
   roverGrid: $("statusGrid"),
   roverMode: $("roverWaypointMode"),
-  roverTimeline: $("roverTimeline"),
   slaveAircraftTab: $("slaveAircraftTab"),
   slaveMode: $("slaveWaypointMode"),
   speed: $("speedInput"),
@@ -98,12 +96,6 @@ function renderMetrics(root, entries) {
   )).join("");
 }
 
-function renderTimeline(root, telemetry, vehicle) {
-  root.innerHTML = Core.transactionTimeline(telemetry, vehicle).map((item) => (
-    `<div class="timeline-item ${item.state}" title="${escapeHtml(item.detail)}">${escapeHtml(item.label)}</div>`
-  )).join("");
-}
-
 function formatTime(seconds) {
   if (!Number(seconds)) return "-";
   return new Date(Number(seconds) * 1000).toLocaleTimeString();
@@ -146,7 +138,7 @@ function collectAircraftMessages(state, target) {
   history.splice(0, history.length, ...merged);
 }
 
-function aircraftDetails(aircraft) {
+function aircraftDetails(aircraft, target) {
   const heading = Number(aircraft.heading);
   const normalizedHeading = Number.isFinite(heading)
     ? (((Math.abs(heading) > 360 ? heading / 100 : heading) % 360) + 360) % 360
@@ -158,7 +150,7 @@ function aircraftDetails(aircraft) {
     ["高度", aircraft.altitude != null ? `${Number(aircraft.altitude).toFixed(2)} m` : "-"],
     ["速度", aircraft.ground_speed != null ? `${Number(aircraft.ground_speed).toFixed(2)} m/s` : "-"],
     ["航向", Number.isFinite(normalizedHeading) ? `${normalizedHeading.toFixed(2)}°` : "-"],
-    ["位置", Core.formatObservedPosition(aircraft)],
+    ["位置", Core.formatObservedPosition(aircraft, 5, target === "aircraft_2")],
     ["任务", aircraft.mission_status || "-"],
   ];
 }
@@ -185,13 +177,6 @@ function renderState(state) {
     ["LTE", `${telemetry.lte_rssi ?? "-"} dBm`],
     ["位置", Core.formatObservedPosition(telemetry)],
   ]);
-  renderTimeline(els.roverTimeline, telemetry, "rover");
-  renderTimeline(
-    els.aircraftTimeline,
-    selectedAircraft === "aircraft_2" ? aircraft : telemetry,
-    selectedAircraft,
-  );
-
   const slaveOnline = selectedAircraft !== "aircraft_2"
     || Boolean(aircraft.state_fresh && aircraft.online);
   const blocked = selectedAircraft === "aircraft_2"
@@ -213,7 +198,7 @@ function renderState(state) {
     els.aircraftGrid.innerHTML = "";
     renderMessages();
   } else {
-    renderMetrics(els.aircraftGrid, aircraftDetails(aircraft));
+    renderMetrics(els.aircraftGrid, aircraftDetails(aircraft, selectedAircraft));
     renderMessages();
   }
 

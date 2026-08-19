@@ -102,6 +102,23 @@ test("offline slave clears a previously blocked optical state", () => {
 test("formats observed zero position without making it navigable", () => {
   assert.equal(formatObservedPosition({lat: 0, lng: 0, position_observed: true}), "0.00000, 0.00000");
   assert.equal(formatObservedPosition({lat: 0, lng: 0, position_observed: false}), "-");
+  assert.equal(
+    formatObservedPosition({lat: 0, lng: 0, position_observed: false}, 5, true),
+    "0.00000, 0.00000",
+  );
+});
+
+test("ground station omits mission transaction lamps", () => {
+  const html = fs.readFileSync(
+    path.join(__dirname, "../public/index.html"),
+    "utf8",
+  );
+  const app = fs.readFileSync(
+    path.join(__dirname, "../public/app.js"),
+    "utf8",
+  );
+  assert.doesNotMatch(html, /id="(?:rover|aircraft)Timeline"/);
+  assert.doesNotMatch(app, /renderTimeline|(?:rover|aircraft)Timeline/);
 });
 
 test("hidden UI states cannot be overridden by component display rules", () => {

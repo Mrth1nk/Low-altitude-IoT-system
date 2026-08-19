@@ -350,8 +350,13 @@
     return manualPoints.concat({lat, lng, autoReturn: true});
   }
 
-  function formatObservedPosition(vehicle, digits = 5) {
-    if (vehicle?.position_observed !== true) return "-";
+  function formatObservedPosition(vehicle, digits = 5, showZeroWhenUnobserved = false) {
+    if (vehicle?.position_observed !== true) {
+      const places = Math.max(0, Math.min(7, Number(digits) || 5));
+      return showZeroWhenUnobserved
+        ? `${(0).toFixed(places)}, ${(0).toFixed(places)}`
+        : "-";
+    }
     const lat = Number(vehicle.lat);
     const lon = Number(vehicle.lng);
     if (!Number.isFinite(lat) || !Number.isFinite(lon)) return "-";

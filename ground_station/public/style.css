@@ -234,19 +234,6 @@ input {
 }
 .metric span { display: block; color: var(--muted); font-size: 10px; }
 .metric strong { display: block; margin-top: 2px; overflow-wrap: anywhere; font-size: 13px; }
-.timeline { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 4px; }
-.timeline-item {
-  min-width: 0;
-  padding: 5px 4px;
-  border: 1px solid var(--line);
-  border-radius: 5px;
-  color: var(--muted);
-  text-align: center;
-  font-size: 10px;
-}
-.timeline-item.done { border-color: #7dd3a7; background: #ecfdf3; color: #166534; }
-.timeline-item.waiting { border-color: #f7c66d; background: #fff8e8; color: #92400e; }
-.timeline-item.failed { border-color: #f5a0a5; background: #fff1f2; color: #991b1b; }
 .commands, .drive { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 5px; margin-top: 6px; }
 .drive button { border-color: #087f72; background: #087f72; }
 .badge { padding: 4px 7px; border-radius: 4px; background: #edf2f7; color: var(--muted); font-size: 11px; font-weight: 800; }
@@ -263,7 +250,6 @@ input {
   font-weight: 850;
 }
 .aircraft-metrics { grid-template-columns: repeat(4, minmax(0, 1fr)); }
-.aircraft-panel .timeline { margin-top: 7px; }
 .aircraft-commands { grid-template-columns: repeat(3, minmax(0, 1fr)); }
 .aircraft-tabs {
   display: grid;
