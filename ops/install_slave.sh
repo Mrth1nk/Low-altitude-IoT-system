@@ -47,7 +47,8 @@ rollback() {
       etc/systemd/system/low-altitude-slave-network-switch.service \
       etc/systemd/system/low-altitude-slave-network-switch.path \
       usr/local/lib/low-altitude-iot/health_slave.sh \
-      usr/local/lib/low-altitude-iot/switch_slave_network.sh; do
+      usr/local/lib/low-altitude-iot/switch_slave_network.sh \
+      usr/local/lib/low-altitude-iot/configure_follow.py; do
       if [[ -e "$BACKUP_DIR/$rel" ]]; then
         install -d -m 0755 "$(dirname "$(dest /$rel)")"
         cp -a "$BACKUP_DIR/$rel" "$(dest /$rel)"
@@ -96,7 +97,8 @@ if ((!DRY_RUN)); then
     "$(dest /etc/systemd/system/low-altitude-slave-network-switch.service)" \
     "$(dest /etc/systemd/system/low-altitude-slave-network-switch.path)" \
     "$(dest /usr/local/lib/low-altitude-iot/health_slave.sh)" \
-    "$(dest /usr/local/lib/low-altitude-iot/switch_slave_network.sh)"; do
+    "$(dest /usr/local/lib/low-altitude-iot/switch_slave_network.sh)" \
+    "$(dest /usr/local/lib/low-altitude-iot/configure_follow.py)"; do
     [[ -e "$path" ]] && cp -a --parents "$path" "$BACKUP_DIR"
   done
 fi
@@ -117,6 +119,7 @@ fi
 run install -d -m 0755 "$(dest /usr/local/lib/low-altitude-iot)" "$(dest /etc/systemd/system)"
 run install -m 0755 "$SOURCE_DIR/ops/health_slave.sh" "$(dest /usr/local/lib/low-altitude-iot/health_slave.sh)"
 run install -m 0755 "$SOURCE_DIR/ops/switch_slave_network.sh" "$(dest /usr/local/lib/low-altitude-iot/switch_slave_network.sh)"
+run install -m 0755 "$SOURCE_DIR/ops/configure_follow.py" "$(dest /usr/local/lib/low-altitude-iot/configure_follow.py)"
 run install -m 0644 "$SOURCE_DIR/ops/systemd/low-altitude-slave.service" "$(dest /etc/systemd/system/low-altitude-slave.service)"
 run install -m 0644 "$SOURCE_DIR/ops/systemd/low-altitude-slave-network-switch.service" "$(dest /etc/systemd/system/low-altitude-slave-network-switch.service)"
 run install -m 0644 "$SOURCE_DIR/ops/systemd/low-altitude-slave-network-switch.path" "$(dest /etc/systemd/system/low-altitude-slave-network-switch.path)"
