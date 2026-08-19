@@ -6,6 +6,7 @@ import socket
 import time
 import uuid
 from collections import deque
+from dataclasses import replace
 
 from shared_protocol.node_messages import (
     NodeMessageError,
@@ -27,6 +28,9 @@ class SlaveTransport:
     """Owns the rover side of the typed aircraft_2 transaction channel."""
 
     TERMINAL_STAGES = frozenset(("VERIFIED", "FAILED"))
+    MISSION_FRAGMENT_ACTIONS = frozenset((
+        "mission_begin", "mission_item", "mission_commit",
+    ))
 
     def __init__(
         self,
@@ -66,6 +70,7 @@ class SlaveTransport:
         self.socket.bind((str(local_host), int(local_port)))
         self._sequence = 0
         self._pending = {}
+        self._mission_fragments = {}
         self._last_status_at = None
         self._last_status = self._offline_state()
         self._seen_responses = set()
@@ -90,6 +95,11 @@ class SlaveTransport:
             raise SlaveUnavailable("aircraft_2 offline")
         if state.get("blocked"):
             raise SlaveUnavailable("aircraft_2 optical link blocked")
+        if command.action in self.MISSION_FRAGMENT_ACTIONS:
+            return self._accept_mission_fragment(command)
+        return self._queue_command(command)
+
+    def _queue_command(self, command):
         command_id = str(command.command_id)
         if command_id in self._pending:
             return {"accepted": True, "stage": "QUEUED", "message": "duplicate pending command"}
@@ -111,6 +121,112 @@ class SlaveTransport:
             "stage": "QUEUED",
             "message": f"aircraft_2 {command.action} queued",
         }
+
+    def _accept_mission_fragment(self, command):
+        command_id = str(command.command_id)
+        if command_id in self._pending:
+            return {
+                "accepted": True,
+                "stage": "QUEUED",
+                "message": "duplicate pending mission fragment",
+            }
+        payload = dict(command.payload)
+        mission_id = str(payload.get("mission_id", "")).strip()
+        if not mission_id:
+            raise ValueError("aircraft_2 mission_id must not be empty")
+
+        if command.action == "mission_begin":
+            item_count = self._fragment_item_count(payload)
+            checksum = self._fragment_checksum(payload)
+            identity = (mission_id, item_count, checksum)
+            existing = self._mission_fragments.get(command_id)
+            if existing is not None:
+                current = (
+                    existing["mission_id"],
+                    existing["item_count"],
+                    existing["checksum"],
+                )
+                if current != identity:
+                    raise ValueError("conflicting aircraft_2 mission_begin")
+                return self._fragment_result("duplicate mission_begin")
+            if len(self._mission_fragments) >= self.max_pending:
+                raise SlaveUnavailable("aircraft_2 mission staging queue full")
+            self._mission_fragments[command_id] = {
+                "mission_id": mission_id,
+                "item_count": item_count,
+                "checksum": checksum,
+                "items": {},
+            }
+            return self._fragment_result("mission_begin received")
+
+        staged = self._mission_fragments.get(command_id)
+        if staged is None:
+            raise ValueError("aircraft_2 mission_begin not received")
+        if mission_id != staged["mission_id"]:
+            raise ValueError("aircraft_2 mission_id mismatch")
+
+        if command.action == "mission_item":
+            index = payload.get("index")
+            if isinstance(index, bool) or not isinstance(index, int):
+                raise ValueError("aircraft_2 mission index must be an integer")
+            if not 0 <= index < staged["item_count"]:
+                raise ValueError("aircraft_2 mission index out of range")
+            item = self._mission_item(payload, index)
+            existing = staged["items"].get(index)
+            if existing is not None and existing != item:
+                raise ValueError("conflicting aircraft_2 mission_item")
+            staged["items"][index] = item
+            return self._fragment_result(
+                "duplicate mission_item" if existing is not None else "mission_item received"
+            )
+
+        item_count = self._fragment_item_count(payload)
+        checksum = self._fragment_checksum(payload)
+        if item_count != staged["item_count"] or checksum != staged["checksum"]:
+            raise ValueError("aircraft_2 mission_commit metadata mismatch")
+        missing = [
+            index for index in range(item_count) if index not in staged["items"]
+        ]
+        if missing:
+            raise ValueError(
+                "aircraft_2 mission missing items: "
+                + ",".join(str(index) for index in missing[:16])
+            )
+        items = [staged["items"][index] for index in range(item_count)]
+        ground_items = [
+            {"mission_id": mission_id, **item} for item in items
+        ]
+        if mission_digest(ground_items) != checksum:
+            raise ValueError("aircraft_2 mission checksum mismatch")
+        complete = replace(
+            command,
+            action="mission",
+            payload={"mission_id": mission_id, "items": items},
+        )
+        result = self._queue_command(complete)
+        self._mission_fragments.pop(command_id, None)
+        return result
+
+    @staticmethod
+    def _fragment_result(message):
+        return {"accepted": True, "stage": "RECEIVED", "message": message}
+
+    @staticmethod
+    def _fragment_item_count(payload):
+        value = payload.get("item_count")
+        if isinstance(value, bool) or not isinstance(value, int) or not 0 <= value <= 99:
+            raise ValueError("aircraft_2 mission item_count must be from 0 to 99")
+        return value
+
+    @staticmethod
+    def _fragment_checksum(payload):
+        value = str(payload.get("checksum", payload.get("digest", "")))
+        if (
+            len(value) != 64
+            or any(char not in "0123456789abcdef" for char in value)
+        ):
+            raise ValueError("aircraft_2 mission checksum must be SHA-256 hex")
+        return value
 
     def pump(self, now=None, max_receive=64):
         now = float(self.monotonic_clock() if now is None else now)
