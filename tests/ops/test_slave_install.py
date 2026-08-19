@@ -51,6 +51,8 @@ class SlaveInstallTests(unittest.TestCase):
         self.assertIn("trap rollback", source)
         self.assertIn("mktemp", source)
         self.assertIn("mv -f", source)
+        self.assertIn("systemctl stop low-altitude-slave.service", source)
+        self.assertIn("seq 1 15", source)
         self.assertNotIn("reboot", source)
 
     def test_installer_requires_root_owned_mode_0600_environment(self):

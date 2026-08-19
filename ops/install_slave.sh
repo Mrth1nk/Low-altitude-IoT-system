@@ -36,6 +36,7 @@ rollback() {
   ((COMMITTED)) && return "$rc"
   say "ROLLBACK: restore prior slave release and service state"
   if ((!DRY_RUN)) && [[ -n "$BACKUP_DIR" && -d "$BACKUP_DIR" ]]; then
+    systemctl stop low-altitude-slave.service || true
     rm -rf "$(dest /opt/low-altitude-iot/current)"
     [[ -e "$(dest /opt/low-altitude-iot/previous)" ]] &&
       mv "$(dest /opt/low-altitude-iot/previous)" "$(dest /opt/low-altitude-iot/current)"
@@ -102,7 +103,19 @@ run systemctl enable low-altitude-slave.service
 run systemctl restart low-altitude-slave.service
 
 say "HEALTH: service, UDP listener and fixed serial identity"
-if ((DRY_RUN)); then run "$SOURCE_DIR/ops/health_slave.sh" --dry-run; else "$(dest /usr/local/lib/low-altitude-iot/health_slave.sh)"; fi
+if ((DRY_RUN)); then
+  run "$SOURCE_DIR/ops/health_slave.sh" --dry-run
+else
+  healthy=0
+  for _attempt in $(seq 1 15); do
+    if "$(dest /usr/local/lib/low-altitude-iot/health_slave.sh)"; then
+      healthy=1
+      break
+    fi
+    sleep 1
+  done
+  ((healthy)) || { echo "slave health did not become ready within 15 seconds" >&2; exit 1; }
+fi
 COMMITTED=1
 trap - ERR INT TERM
 say "Installation committed. Only the slave service was restarted."
