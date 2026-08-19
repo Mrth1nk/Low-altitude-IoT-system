@@ -13,11 +13,14 @@ SupplementaryGroups=dialout
 WorkingDirectory=/opt/low-altitude-iot/current
 EnvironmentFile=/etc/low-altitude-iot/slave.env
 Environment=SLAVE_STATE_DIR=/var/lib/low-altitude-iot/slave
+Environment=SLAVE_RUNTIME_DIR=/run/low-altitude-slave
 ExecStartPre=/usr/local/lib/low-altitude-iot/health_slave.sh --preflight
 ExecStart=/usr/bin/python3 -m slave_agent.main
 Restart=on-failure
 RestartSec=2
 StateDirectory=low-altitude-iot/slave
+RuntimeDirectory=low-altitude-slave
+RuntimeDirectoryPreserve=yes
 UMask=0077
 NoNewPrivileges=yes
 PrivateTmp=yes
