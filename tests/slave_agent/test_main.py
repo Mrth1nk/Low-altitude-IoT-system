@@ -1,4 +1,6 @@
 import tempfile
+import threading
+import time
 import unittest
 from pathlib import Path
 
@@ -84,12 +86,67 @@ class SlaveRuntimeTests(unittest.TestCase):
             self.assertIn((33, 1_000_000), session.requests)
             self.assertEqual(runtime.link.kwargs["local_port"], 14620)
             self.assertEqual(runtime.link.kwargs["peer_port"], 14610)
+            from slave_agent.command_queue import VerifiedOperations
+            from slave_agent.optical_gate import NoOpOpticalGate
+
+            command_queue = runtime.link.args[0]
+            self.assertIsInstance(runtime.worker.operations, VerifiedOperations)
+            self.assertIsInstance(command_queue.optical_gate, NoOpOpticalGate)
+            self.assertIs(command_queue.optical_gate, runtime.state.optical_gate)
+            self.assertIs(command_queue.stage_callback.__self__, runtime.state)
+            self.assertIs(
+                command_queue.stage_callback.__func__,
+                runtime.state.record_stage.__func__,
+            )
+            self.assertIsNotNone(command_queue.delivery_store)
 
             runtime.close()
 
             self.assertTrue(session.closed)
             self.assertTrue(session.connection.closed)
             self.assertTrue(runtime.link.closed)
+
+    def test_close_waits_for_active_worker_before_closing_serial(self):
+        from slave_agent.main import SlaveRuntime
+
+        release = threading.Event()
+
+        class Worker:
+            def __init__(self):
+                self.closed = False
+                self._thread = threading.Thread(target=release.wait, daemon=True)
+                self._thread.start()
+
+            def close(self):
+                self.closed = True
+
+        class Link:
+            def close(self):
+                pass
+
+        class Store:
+            def save(self, _value):
+                pass
+
+        worker = Worker()
+        session = Session()
+        runtime = SlaveRuntime(
+            config=None, session=session, worker=worker, link=Link(), inbox=None,
+            state=None, health_store=Store(),
+        )
+        closer = threading.Thread(target=runtime.close)
+        closer.start()
+        time.sleep(0.05)
+
+        self.assertTrue(worker.closed)
+        self.assertFalse(session.closed)
+        self.assertFalse(session.connection.closed)
+
+        release.set()
+        closer.join(1.0)
+        self.assertFalse(closer.is_alive())
+        self.assertTrue(session.closed)
+        self.assertTrue(session.connection.closed)
 
     def test_config_rejects_non_by_id_flight_controller_path(self):
         from slave_agent.main import SlaveConfig

@@ -14,8 +14,9 @@ from aircraft_agent.mission_worker import AircraftMissionWorker
 from aircraft_agent.state_store import AtomicJsonStore
 from aircraft_agent.telemetry import AircraftTelemetry
 
-from .command_queue import NodeCommandQueue, ThreadSafeInbox
+from .command_queue import NodeCommandQueue, ThreadSafeInbox, VerifiedOperations
 from .link import SlaveUdpLink
+from .optical_gate import NoOpOpticalGate
 from .state import SlaveStateAggregator
 
 
@@ -76,7 +77,7 @@ class SlaveRuntime:
                 "fc_connected": snapshot["fc_connected"],
                 "udp_peer_online": self.link.peer_online(max_age=3.0),
                 "queue_depth": self.inbox.queue_depth,
-                "blocked": False,
+                "blocked": snapshot["blocked"],
                 "last_error": snapshot["fault"],
             })
         return received
@@ -87,6 +88,9 @@ class SlaveRuntime:
         self._closed = True
         self.link.close()
         self.worker.close()
+        worker_thread = getattr(self.worker, "_thread", None)
+        if worker_thread is not None and worker_thread.is_alive():
+            worker_thread.join()
         self.session.close()
         connection = getattr(self.session, "connection", None)
         close = getattr(connection, "close", None)
@@ -105,7 +109,12 @@ def build_runtime(
     config.state_dir.mkdir(parents=True, exist_ok=True)
     config.runtime_dir.mkdir(parents=True, exist_ok=True)
     telemetry = AircraftTelemetry(freshness=3.0)
-    state = SlaveStateAggregator(clock=clock, heartbeat_freshness=3.0)
+    optical_gate = NoOpOpticalGate()
+    state = SlaveStateAggregator(
+        clock=clock,
+        heartbeat_freshness=3.0,
+        optical_gate=optical_gate,
+    )
     session = session_factory(
         config.fc_device,
         config.fc_baud,
@@ -121,13 +130,21 @@ def build_runtime(
         max_queue=16,
     ))
     mission = AircraftMissionWorker(session, telemetry)
+    operations = VerifiedOperations(mission, state)
     worker = AircraftCommandWorker(
         inbox,
-        mission,
+        operations,
         max_pending=16,
         start_thread=start_worker,
     )
-    command_queue = NodeCommandQueue(inbox, clock=clock, max_age=3.0)
+    command_queue = NodeCommandQueue(
+        inbox,
+        clock=clock,
+        max_age=3.0,
+        delivery_store=AtomicJsonStore(config.state_dir / "delivery.json"),
+        stage_callback=state.record_stage,
+        optical_gate=optical_gate,
+    )
     link = link_factory(
         command_queue,
         state,
