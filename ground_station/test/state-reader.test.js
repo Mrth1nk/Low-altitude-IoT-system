@@ -128,7 +128,14 @@ test("cached slave freshness ages independently while rover remains fresh", asyn
   now = 13_500;
   const second = await instance();
   assert.equal(second.state_fresh, true);
-  assert.equal(second.slave.state_fresh, false);
-  assert.equal(second.slave.status, "OFFLINE");
+  assert.equal(second.slave.state_fresh, true);
+  assert.equal(second.slave.status, undefined);
   assert.equal(second.aircraft.link_active, true);
+
+  now = 18_500;
+  const third = await instance();
+  assert.equal(third.slave.state_fresh, false);
+  assert.equal(third.slave.online, false);
+  assert.equal(third.slave.blocked, false);
+  assert.equal(third.slave.status, "OFFLINE");
 });

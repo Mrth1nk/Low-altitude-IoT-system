@@ -20,7 +20,9 @@
   ]);
   const AIRCRAFT_PREFIX = "aircraft_";
   const SLAVE_TARGET = "aircraft_2";
-  const SLAVE_STALE_SECONDS = 3;
+  // RDK decides link liveness at 3 s. The cloud UI also has a 2 s report
+  // interval and a 2 s server cache, so allow transport latency here.
+  const SLAVE_CLOUD_GRACE_SECONDS = 8;
   const MAX_MISSION_ITEMS = 100;
   const MAV_CMD_NAV_WAYPOINT = 16;
   const MAV_CMD_DO_CHANGE_SPEED = 178;
@@ -63,18 +65,19 @@
     const source = parseRoverState(rawState);
     const updatedAt = Number(source.updated_at || source.timestamp || 0);
     const age = updatedAt > 0 ? Math.max(0, receivedAt - updatedAt) : null;
-    const fresh = age !== null && age <= SLAVE_STALE_SECONDS;
-    const blocked = source.blocked === true;
+    const fresh = age !== null && age <= SLAVE_CLOUD_GRACE_SECONDS;
+    const online = fresh && source.online === true;
+    const blocked = online && source.blocked === true;
     const event = source.event && typeof source.event === "object" ? source.event : null;
     return {
       ...source,
       updated_at: updatedAt,
       state_age_sec: age,
       state_fresh: fresh,
-      online: fresh && source.online === true,
-      link_active: fresh && source.online === true && source.fc_connected !== false,
+      online,
+      link_active: online && source.fc_connected !== false,
       blocked,
-      status: !fresh || source.online !== true
+      status: !online
         ? "OFFLINE"
         : blocked ? "OPTICAL LINK BLOCKED" : "ONLINE",
       lng: source.lng ?? source.lon,
@@ -561,7 +564,23 @@
     return {
       routes: {rover: [], aircraft: [], aircraft_2: []},
       messages: {aircraft: [], aircraft_2: []},
+      altitudes: {aircraft: 20, aircraft_2: 20},
     };
+  }
+
+  function switchAircraftAltitude(altitudes, previousTarget, nextTarget, displayedValue) {
+    const aircraftTargets = new Set(["aircraft", SLAVE_TARGET]);
+    if (aircraftTargets.has(previousTarget)) {
+      const current = Number(displayedValue);
+      if (Number.isFinite(current) && current >= 1 && current <= 120) {
+        altitudes[previousTarget] = current;
+      }
+    }
+    if (!aircraftTargets.has(nextTarget)) return null;
+    const restored = Number(altitudes[nextTarget]);
+    if (Number.isFinite(restored) && restored >= 1 && restored <= 120) return restored;
+    altitudes[nextTarget] = 20;
+    return 20;
   }
 
   return {
@@ -578,6 +597,7 @@
     normalizeCloudState,
     prepareAircraftUploadRoute,
     routeSegmentDistances,
+    switchAircraftAltitude,
     transactionTimeline,
     validCoordinate,
   };

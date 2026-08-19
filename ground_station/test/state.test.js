@@ -65,6 +65,40 @@ test("stale slave disables only slave commands", () => {
   assert.equal(aircraftCommandsAllowed(state, "aircraft"), true);
 });
 
+test("slave stays commandable across Tuya report and cache latency", () => {
+  const state = normalizeCloudState([
+    {code: "rover_state", value: JSON.stringify({updated_at: 1710000004})},
+    {code: "slave_state", value: JSON.stringify({
+      updated_at: 1710000000,
+      online: true,
+      fc_connected: true,
+      blocked: false,
+    })},
+  ], 1710000004500);
+
+  assert.equal(state.slave.state_age_sec, 4.5);
+  assert.equal(state.slave.state_fresh, true);
+  assert.equal(state.slave.online, true);
+  assert.equal(aircraftCommandsAllowed(state, "aircraft_2"), true);
+});
+
+test("offline slave clears a previously blocked optical state", () => {
+  const state = normalizeCloudState([
+    {code: "rover_state", value: JSON.stringify({updated_at: 1710000010})},
+    {code: "slave_state", value: JSON.stringify({
+      updated_at: 1710000009.5,
+      online: false,
+      fc_connected: true,
+      blocked: true,
+    })},
+  ], 1710000010000);
+
+  assert.equal(state.slave.state_fresh, true);
+  assert.equal(state.slave.online, false);
+  assert.equal(state.slave.blocked, false);
+  assert.equal(state.slave.status, "OFFLINE");
+});
+
 test("formats observed zero position without making it navigable", () => {
   assert.equal(formatObservedPosition({lat: 0, lng: 0, position_observed: true}), "0.00000, 0.00000");
   assert.equal(formatObservedPosition({lat: 0, lng: 0, position_observed: false}), "-");

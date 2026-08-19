@@ -10,6 +10,7 @@ const {
   isAircraftCommand,
   prepareAircraftUploadRoute,
   routeSegmentDistances,
+  switchAircraftAltitude,
 } = require("../public/core.js");
 const {buildAircraftMissionFragments, buildCommandsBody, buildIssueBody} = require("../server.js");
 
@@ -210,6 +211,16 @@ test("main and slave mission queues and message histories never share arrays", (
   assert.deepEqual(stores.messages.aircraft, []);
   assert.notEqual(stores.routes.aircraft, stores.routes.aircraft_2);
   assert.notEqual(stores.messages.aircraft, stores.messages.aircraft_2);
+});
+
+test("main and slave aircraft restore independent altitude inputs", () => {
+  const stores = createGroundStationStores();
+
+  assert.equal(switchAircraftAltitude(stores.altitudes, "rover", "aircraft", 0), 20);
+  assert.equal(switchAircraftAltitude(stores.altitudes, "aircraft", "aircraft_2", 35), 20);
+  assert.equal(switchAircraftAltitude(stores.altitudes, "aircraft_2", "aircraft", 18), 35);
+  assert.equal(stores.altitudes.aircraft, 35);
+  assert.equal(stores.altitudes.aircraft_2, 18);
 });
 
 test("slave return point uses slave current position without changing main return logic", () => {

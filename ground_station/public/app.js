@@ -126,7 +126,7 @@ function selectedAircraftState(state = latestState) {
 function collectAircraftMessages(state, target) {
   const aircraft = target === "aircraft_2" ? state.slave || {} : state.aircraft || {};
   const blocked = target === "aircraft_2"
-    ? Boolean(aircraft.blocked)
+    ? Boolean(aircraft.state_fresh && aircraft.online && aircraft.blocked)
     : Boolean(state.optical?.blocked);
   const incoming = blocked
     ? aircraft.messages
@@ -192,13 +192,17 @@ function renderState(state) {
     selectedAircraft,
   );
 
+  const slaveOnline = selectedAircraft !== "aircraft_2"
+    || Boolean(aircraft.state_fresh && aircraft.online);
   const blocked = selectedAircraft === "aircraft_2"
-    ? Boolean(aircraft.blocked)
+    ? Boolean(slaveOnline && aircraft.blocked)
     : Boolean(state.optical?.blocked);
   const allowed = Core.aircraftCommandsAllowed(state, selectedAircraft);
   els.blocked.hidden = !blocked;
   els.aircraftContent.hidden = false;
-  els.opticalBadge.textContent = blocked ? "BLOCKED" : aircraft.status || "OFFLINE";
+  els.opticalBadge.textContent = !slaveOnline
+    ? "OFFLINE"
+    : blocked ? "BLOCKED" : aircraft.status || "OFFLINE";
   els.opticalBadge.classList.toggle("locked", allowed);
   for (const button of document.querySelectorAll("[data-aircraft-command]")) {
     button.disabled = !allowed;
@@ -449,7 +453,15 @@ function redrawRoutes() {
 }
 
 function setVehicleMode(vehicle) {
-  selectedVehicle = ["aircraft", "aircraft_2"].includes(vehicle) ? vehicle : "rover";
+  const nextVehicle = ["aircraft", "aircraft_2"].includes(vehicle) ? vehicle : "rover";
+  const restoredAltitude = Core.switchAircraftAltitude(
+    stores.altitudes,
+    selectedVehicle,
+    nextVehicle,
+    els.altitude.value,
+  );
+  selectedVehicle = nextVehicle;
+  if (restoredAltitude !== null) els.altitude.value = String(restoredAltitude);
   const aircraft = selectedVehicle !== "rover";
   els.roverMode.classList.toggle("active", selectedVehicle === "rover");
   els.aircraftMode.classList.toggle("active", selectedVehicle === "aircraft");
@@ -664,7 +676,15 @@ els.mainAircraftTab.onclick = () => setAircraftTab("aircraft");
 els.slaveAircraftTab.onclick = () => setAircraftTab("aircraft_2");
 els.fenceEnabled.onchange = redrawRoutes;
 els.fenceRadius.oninput = redrawRoutes;
-els.altitude.oninput = renderQueue;
+els.altitude.oninput = () => {
+  Core.switchAircraftAltitude(
+    stores.altitudes,
+    selectedVehicle,
+    selectedVehicle,
+    els.altitude.value,
+  );
+  renderQueue();
+};
 els.lat.onchange = () => setTarget(Number(els.lat.value), Number(els.lng.value));
 els.lng.onchange = () => setTarget(Number(els.lat.value), Number(els.lng.value));
 

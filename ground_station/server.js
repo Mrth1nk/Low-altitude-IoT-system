@@ -203,10 +203,11 @@ function createStateReader({
       ? Math.max(0, now() / 1000 - slaveUpdatedAt)
       : null;
     served.slave.state_fresh = served.slave.state_age_sec !== null
-      && served.slave.state_age_sec <= 3;
+      && served.slave.state_age_sec <= 8;
     if (!served.slave.state_fresh) {
       served.slave.online = false;
       served.slave.link_active = false;
+      served.slave.blocked = false;
       served.slave.status = "OFFLINE";
     }
     return served;
