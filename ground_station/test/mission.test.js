@@ -2,6 +2,8 @@
 
 const test = require("node:test");
 const assert = require("node:assert/strict");
+const fs = require("node:fs");
+const path = require("node:path");
 
 const {
   buildMissionCommand,
@@ -297,11 +299,20 @@ test("Tuya DP passthrough body converts every property into a device command", (
 
 test("command filtering identifies every aircraft command including full missions", () => {
   assert.equal(isAircraftCommand({command: "aircraft_auto"}), true);
+  assert.equal(isAircraftCommand({command: "aircraft_follow", target: "aircraft_2"}), true);
   assert.equal(
     isAircraftCommand({command: "aircraft_mission", target: "aircraft"}),
     true,
   );
   assert.equal(isAircraftCommand({command: "mission", target: "rover"}), false);
+});
+
+test("FOLLOW control is visible only for aircraft 2", () => {
+  const html = fs.readFileSync(path.join(__dirname, "../public/index.html"), "utf8");
+  const app = fs.readFileSync(path.join(__dirname, "../public/app.js"), "utf8");
+  assert.match(html, /id="aircraftFollowBtn"[^>]*data-aircraft-command="aircraft_follow"/);
+  assert.match(app, /aircraftFollowBtn/);
+  assert.match(app, /selectedAircraft\s*!==\s*"aircraft_2"/);
 });
 
 test("server property filter preserves hidden network mode commands", () => {

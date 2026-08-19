@@ -15,6 +15,7 @@ from aircraft_agent.state_store import AtomicJsonStore
 from aircraft_agent.telemetry import AircraftTelemetry
 
 from .command_queue import NodeCommandQueue, ThreadSafeInbox, VerifiedOperations
+from .follow_receiver import FollowTargetReceiver
 from .link import SlaveUdpLink
 from .optical_gate import NoOpOpticalGate
 from .state import SlaveStateAggregator
@@ -27,6 +28,7 @@ class SlaveConfig:
     peer_ip: str
     peer_port: int
     local_port: int
+    follow_port: int
     state_dir: Path
     runtime_dir: Path
 
@@ -35,7 +37,7 @@ class SlaveConfig:
             raise ValueError("flight controller must use a fixed /dev/serial/by-id path")
         if int(self.fc_baud) <= 0:
             raise ValueError("flight-controller baud must be positive")
-        for value in (self.peer_port, self.local_port):
+        for value in (self.peer_port, self.local_port, self.follow_port):
             if not 1 <= int(value) <= 65535:
                 raise ValueError("UDP port must be from 1 to 65535")
 
@@ -47,6 +49,7 @@ class SlaveConfig:
             peer_ip=os.environ.get("SLAVE_ROVER_IP", "192.168.4.2"),
             peer_port=int(os.environ.get("SLAVE_ROVER_PORT", "14610")),
             local_port=int(os.environ.get("SLAVE_LOCAL_PORT", "14620")),
+            follow_port=int(os.environ.get("SLAVE_FOLLOW_PORT", "14630")),
             state_dir=Path(os.environ.get("SLAVE_STATE_DIR", "/var/lib/low-altitude-slave")),
             runtime_dir=Path(os.environ.get("SLAVE_RUNTIME_DIR", "/run/low-altitude-slave")),
         )
@@ -78,7 +81,7 @@ class NetworkRequestOperations:
 
 
 class SlaveRuntime:
-    def __init__(self, *, config, session, worker, link, inbox, state, health_store, clock=time.time):
+    def __init__(self, *, config, session, worker, link, inbox, state, health_store, follow_receiver=None, clock=time.time):
         self.config = config
         self.session = session
         self.worker = worker
@@ -86,12 +89,18 @@ class SlaveRuntime:
         self.inbox = inbox
         self.state = state
         self.health_store = health_store
+        self.follow_receiver = follow_receiver
         self.clock = clock
         self._last_health_at = 0.0
         self._closed = False
 
     def run_once(self):
         received = self.link.run_once()
+        follow_received = (
+            self.follow_receiver.run_once()
+            if self.follow_receiver is not None
+            else 0
+        )
         now = float(self.clock())
         if now - self._last_health_at >= 1.0:
             self._last_health_at = now
@@ -104,14 +113,21 @@ class SlaveRuntime:
                 "queue_depth": self.inbox.queue_depth,
                 "blocked": snapshot["blocked"],
                 "last_error": snapshot["fault"],
+                "follow_target": (
+                    self.follow_receiver.snapshot()
+                    if self.follow_receiver is not None
+                    else {"enabled": False}
+                ),
             })
-        return received
+        return received + follow_received
 
     def close(self):
         if self._closed:
             return
         self._closed = True
         self.link.close()
+        if self.follow_receiver is not None:
+            self.follow_receiver.close()
         self.worker.close()
         worker_thread = getattr(self.worker, "_thread", None)
         if worker_thread is not None and worker_thread.is_alive():
@@ -128,6 +144,7 @@ def build_runtime(
     *,
     session_factory=MavlinkSession.open,
     link_factory=SlaveUdpLink,
+    follow_receiver_factory=FollowTargetReceiver,
     start_worker=True,
     clock=time.time,
 ):
@@ -183,6 +200,11 @@ def build_runtime(
         local_port=config.local_port,
         clock=clock,
     )
+    follow_receiver = follow_receiver_factory(
+        session,
+        local_port=config.follow_port,
+        rover_ip=config.peer_ip,
+    )
     return SlaveRuntime(
         config=config,
         session=session,
@@ -191,6 +213,7 @@ def build_runtime(
         inbox=inbox,
         state=state,
         health_store=AtomicJsonStore(config.runtime_dir / "slave-health.json"),
+        follow_receiver=follow_receiver,
         clock=clock,
     )
 

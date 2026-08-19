@@ -51,6 +51,22 @@ class FakeLink:
         self.closed = True
 
 
+class FakeFollowReceiver:
+    def __init__(self, *args, **kwargs):
+        self.args = args
+        self.kwargs = kwargs
+        self.closed = False
+
+    def run_once(self):
+        return 0
+
+    def snapshot(self):
+        return {"received": 0}
+
+    def close(self):
+        self.closed = True
+
+
 class SlaveRuntimeTests(unittest.TestCase):
     def test_build_runtime_uses_fixed_by_id_and_single_reader(self):
         from slave_agent.main import SlaveConfig, build_runtime
@@ -69,6 +85,7 @@ class SlaveRuntimeTests(unittest.TestCase):
                 peer_ip="192.168.4.2",
                 peer_port=14610,
                 local_port=14620,
+                follow_port=14630,
                 state_dir=Path(tmp),
                 runtime_dir=Path(tmp),
             )
@@ -76,6 +93,7 @@ class SlaveRuntimeTests(unittest.TestCase):
                 config,
                 session_factory=open_session,
                 link_factory=FakeLink,
+                follow_receiver_factory=FakeFollowReceiver,
                 start_worker=False,
             )
 
@@ -87,6 +105,8 @@ class SlaveRuntimeTests(unittest.TestCase):
             self.assertIn((33, 1_000_000), session.requests)
             self.assertEqual(runtime.link.kwargs["local_port"], 14620)
             self.assertEqual(runtime.link.kwargs["peer_port"], 14610)
+            self.assertEqual(runtime.follow_receiver.kwargs["local_port"], 14630)
+            self.assertIs(runtime.follow_receiver.args[0], session)
             from slave_agent.command_queue import VerifiedOperations
             from slave_agent.main import NetworkRequestOperations
             from slave_agent.optical_gate import NoOpOpticalGate
@@ -108,6 +128,7 @@ class SlaveRuntimeTests(unittest.TestCase):
             self.assertTrue(session.closed)
             self.assertTrue(session.connection.closed)
             self.assertTrue(runtime.link.closed)
+            self.assertTrue(runtime.follow_receiver.closed)
 
     def test_network_phone_request_is_persisted_without_touching_flight_mode(self):
         from slave_agent.main import NetworkRequestOperations
@@ -187,6 +208,7 @@ class SlaveRuntimeTests(unittest.TestCase):
                 peer_ip="192.168.4.2",
                 peer_port=14610,
                 local_port=14620,
+                follow_port=14630,
                 state_dir=Path("/tmp/state"),
                 runtime_dir=Path("/tmp/run"),
             )

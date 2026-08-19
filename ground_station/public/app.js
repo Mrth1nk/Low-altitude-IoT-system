@@ -5,6 +5,7 @@ const $ = (id) => document.getElementById(id);
 const els = {
   aircraftContent: $("aircraftContent"),
   aircraftGrid: $("aircraftGrid"),
+  aircraftFollowBtn: $("aircraftFollowBtn"),
   aircraftMessages: $("aircraftMessages"),
   aircraftMode: $("aircraftWaypointMode"),
   aircraftPanelTitle: $("aircraftPanelTitle"),
@@ -161,6 +162,7 @@ function renderState(state) {
   collectAircraftMessages(state, "aircraft_2");
   const telemetry = state.telemetry || {};
   const aircraft = selectedAircraftState(state);
+  els.aircraftFollowBtn.hidden = selectedAircraft !== "aircraft_2";
   els.mainAircraftTab.classList.toggle("online", Core.aircraftCommandsAllowed(state, "aircraft"));
   els.slaveAircraftTab.classList.toggle("online", Core.aircraftCommandsAllowed(state, "aircraft_2"));
   els.cloudDot.classList.toggle("online", Boolean(state.online));
@@ -465,6 +467,7 @@ function setAircraftTab(target) {
   els.mainAircraftTab.classList.toggle("active", selectedAircraft === "aircraft");
   els.slaveAircraftTab.classList.toggle("active", selectedAircraft === "aircraft_2");
   els.aircraftPanelTitle.textContent = selectedAircraft === "aircraft" ? "主机任务" : "从机任务";
+  els.aircraftFollowBtn.hidden = selectedAircraft !== "aircraft_2";
   if (latestState) renderState(latestState);
   else renderMessages();
 }
