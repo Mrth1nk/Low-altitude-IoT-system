@@ -11,6 +11,13 @@ for arg in "$@"; do
   esac
 done
 
+if [[ -z "${SLAVE_FC_DEVICE:-}" && -r /etc/low-altitude-iot/slave.env ]]; then
+  set -a
+  # shellcheck disable=SC1091
+  source /etc/low-altitude-iot/slave.env
+  set +a
+fi
+
 FC_DEVICE="${SLAVE_FC_DEVICE:-}"
 PEER_HOST="${SLAVE_ROVER_IP:-192.168.4.2}"
 LOCAL_PORT="${SLAVE_LOCAL_PORT:-14620}"

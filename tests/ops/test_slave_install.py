@@ -40,6 +40,9 @@ class SlaveInstallTests(unittest.TestCase):
         for marker in ("by-id", "Copter heartbeat", "serial owner", "192.168.4.2", "14620"):
             self.assertIn(marker, output)
 
+        source = HEALTH.read_text()
+        self.assertIn("/etc/low-altitude-iot/slave.env", source)
+
     def test_installer_is_atomic_reversible_and_does_not_reboot(self):
         with tempfile.TemporaryDirectory() as tmp:
             result = run_script(INSTALL, "--dry-run", "--root", tmp)
