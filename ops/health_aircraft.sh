@@ -17,7 +17,7 @@ if ((DRY_RUN)); then
   cat <<EOF
 CHECK low-altitude-aircraft.service active and low-altitude-vision.service active
 CHECK atomic snapshot $HEALTH exists without temporary sibling
-CHECK fields command_id queue_depth fc_heartbeat_at optical last_error and fresh timestamp
+CHECK fields command_id queue_depth fc_heartbeat_at optical last_error follow_target and fresh timestamp
 CHECK optical atomic state $OPTICAL is fresh and structurally valid
 CHECK /proc MainPID fd roles: aircraft owns ttyACM0/ttyUSB0 only
 CHECK /proc MainPID fd roles: vision owns ttyS9/configured camera only
@@ -52,8 +52,14 @@ required = {
     "timestamp", "command_id", "queue_depth", "fc_heartbeat_at",
     "optical", "last_error",
 }
-if set(health) != required:
+if not required <= set(health):
     raise SystemExit("FAIL: health snapshot fields invalid")
+follow = health.get("follow_target")
+if not isinstance(follow, dict):
+    raise SystemExit("FAIL: follow_target health missing")
+for field in ("produced", "stale", "dropped"):
+    if not isinstance(follow.get(field), int) or follow[field] < 0:
+        raise SystemExit(f"FAIL: follow_target {field} invalid")
 now = time.time()
 if now - float(health["timestamp"]) > 2.0:
     raise SystemExit("FAIL: health snapshot stale")

@@ -225,6 +225,12 @@ class AircraftRuntimeStateTests(unittest.TestCase):
 
 
 class AircraftInstallerTests(unittest.TestCase):
+    def test_health_checks_follow_target_publisher(self):
+        source = HEALTH.read_text()
+        self.assertIn("follow_target", source)
+        self.assertIn("produced", source)
+        self.assertIn("stale", source)
+
     def test_installer_dry_run_is_transactional_and_secret_safe(self):
         with tempfile.TemporaryDirectory() as tmp:
             result = run_script(

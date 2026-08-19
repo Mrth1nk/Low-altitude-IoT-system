@@ -21,7 +21,9 @@ fi
 FC_DEVICE="${SLAVE_FC_DEVICE:-}"
 PEER_HOST="${SLAVE_ROVER_IP:-192.168.4.2}"
 LOCAL_PORT="${SLAVE_LOCAL_PORT:-14620}"
+FOLLOW_PORT="${SLAVE_FOLLOW_PORT:-14630}"
 HEARTBEAT_TIMEOUT="${SLAVE_HEARTBEAT_TIMEOUT:-5}"
+HEALTH="${SLAVE_RUNTIME_DIR:-/run/low-altitude-slave}/slave-health.json"
 
 if ((DRY_RUN)); then
   cat <<EOF
@@ -29,6 +31,7 @@ CHECK fixed /dev/serial/by-id flight-controller identity
 CHECK no competing serial owner
 CHECK Copter heartbeat within ${HEARTBEAT_TIMEOUT}s
 CHECK UDP peer ${PEER_HOST}, local port ${LOCAL_PORT}
+CHECK FOLLOW_TARGET UDP local port ${FOLLOW_PORT} and health counters
 CHECK low-altitude-slave.service when not in preflight mode
 EOF
   exit 0
@@ -83,4 +86,26 @@ systemctl is-active --quiet low-altitude-slave.service || {
 ss -lun | grep -Eq ":[[:space:]]*${LOCAL_PORT}[[:space:]]|:${LOCAL_PORT}[[:space:]]" || {
   echo "FAIL: slave UDP port ${LOCAL_PORT} is not listening" >&2; exit 1;
 }
-echo "OK: slave service active; FC=$FC_DEVICE peer=$PEER_HOST port=$LOCAL_PORT"
+ss -lun | grep -Eq ":[[:space:]]*${FOLLOW_PORT}[[:space:]]|:${FOLLOW_PORT}[[:space:]]" || {
+  echo "FAIL: FOLLOW_TARGET UDP port ${FOLLOW_PORT} is not listening" >&2; exit 1;
+}
+python3 - "$HEALTH" <<'PY'
+import json
+from pathlib import Path
+import sys
+import time
+
+path = Path(sys.argv[1])
+if not path.is_file():
+    raise SystemExit("FAIL: slave health snapshot missing")
+health = json.loads(path.read_text())
+if time.time() - float(health.get("timestamp", 0.0)) > 3.0:
+    raise SystemExit("FAIL: slave health snapshot stale")
+follow = health.get("follow_target")
+if not isinstance(follow, dict):
+    raise SystemExit("FAIL: follow_target health missing")
+for field in ("received", "rejected", "write_errors"):
+    if not isinstance(follow.get(field), int) or follow[field] < 0:
+        raise SystemExit(f"FAIL: follow_target {field} invalid")
+PY
+echo "OK: slave service active; FC=$FC_DEVICE peer=$PEER_HOST ports=$LOCAL_PORT/$FOLLOW_PORT"
