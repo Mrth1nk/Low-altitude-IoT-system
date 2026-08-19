@@ -13,6 +13,7 @@ from aircraft_gateway import start_aircraft_gateway
 from aircraft_link import AircraftLink
 from aircraft_transport import AircraftTransport, legacy_gateway_ports
 from command_router import CloudCommand, CommandRejected, CommandRouter
+from follow_relay import FollowTargetRelay
 from l610 import check_l610, ensure_l610_usbnet, read_lte_rssi
 from mavlink_rover import RoverMavlink, discover_mavlink_urls
 from network_mode import NetworkModeExecutor
@@ -78,6 +79,12 @@ def load_config(path: Path = CONFIG_PATH) -> dict:
     data.setdefault(
         "slave_max_attempts",
         int(os.environ.get("SLAVE_MAX_ATTEMPTS", "6")),
+    )
+    data.setdefault("slave_follow_host", os.environ.get("SLAVE_FOLLOW_HOST", "192.168.4.3"))
+    data.setdefault("slave_follow_port", int(os.environ.get("SLAVE_FOLLOW_PORT", "14630")))
+    data.setdefault(
+        "slave_follow_max_age_sec",
+        float(os.environ.get("SLAVE_FOLLOW_MAX_AGE_SEC", "1.5")),
     )
     return data
 
@@ -165,12 +172,19 @@ def consume_local_commands(command_path: Path) -> list[CloudCommand]:
     return commands
 
 
-def write_state(path: Path, telemetry: RoverTelemetry, connected: bool) -> None:
+def write_state(
+    path: Path,
+    telemetry: RoverTelemetry,
+    connected: bool,
+    local_health=None,
+) -> None:
     doc = {
         "online": connected,
         "updated_at": time.time(),
         "telemetry": telemetry.data(),
     }
+    if local_health is not None:
+        doc["local_health"] = dict(local_health)
     path.write_text(json.dumps(doc, ensure_ascii=False, indent=2))
 
 
@@ -349,6 +363,23 @@ def run_agent(config: dict) -> int:
     command_path = Path(config["command_path"])
     aircraft_local_port = int(config.get("aircraft_link_local_port", 14560))
     aircraft_gateway = start_aircraft_state_gateway(config, aircraft_local_port)
+    follow_relay = FollowTargetRelay(
+        peer=(
+            str(config.get("slave_follow_host", "192.168.4.3")),
+            int(config.get("slave_follow_port", 14630)),
+        ),
+        max_age_s=float(config.get("slave_follow_max_age_sec", 1.5)),
+    ) if slave_node_enabled(config) else None
+
+    def observe_aircraft_packet(data, remote):
+        parsed = aircraft_gateway.record_packet(
+            aircraft_local_port,
+            data,
+            remote,
+        )
+        relayed = follow_relay.observe(data, remote) if follow_relay else 0
+        return parsed or relayed > 0
+
     connected = False
     pending: list[CloudCommand] = []
     manual_active_until = 0.0
@@ -372,11 +403,7 @@ def run_agent(config: dict) -> int:
             "AIRCRAFT_LINK_PSK"
         ),
         auth_store=AtomicJsonStore(config["aircraft_auth_state_path"]),
-        packet_observer=lambda data, remote: aircraft_gateway.record_packet(
-            aircraft_local_port,
-            data,
-            remote,
-        ),
+        packet_observer=observe_aircraft_packet,
         plaintext=(
             bool(config.get("aircraft_link_plaintext", False))
             or os.environ.get("AIRCRAFT_LINK_PLAINTEXT", "0") == "1"
@@ -544,7 +571,16 @@ def run_agent(config: dict) -> int:
             if now >= next_lte and not manual_is_active:
                 telemetry.lte_rssi = read_lte_rssi(config["at_port"])
                 next_lte = now + 10
-            write_state(state_path, telemetry, connected)
+            write_state(
+                state_path,
+                telemetry,
+                connected,
+                local_health={
+                    "follow_relay": follow_relay.snapshot()
+                    if follow_relay is not None
+                    else {"enabled": False},
+                },
+            )
             aircraft_summary = read_aircraft_summary(
                 transport_status=aircraft_transport.status()
             )
@@ -565,7 +601,16 @@ def run_agent(config: dict) -> int:
                 print(f"published {report_topic} rc={info.rc} msgId={payload['msgId']}", flush=True)
         except Exception as exc:
             telemetry.fault_text = f"agent loop error: {exc}"
-            write_state(state_path, telemetry, connected)
+            write_state(
+                state_path,
+                telemetry,
+                connected,
+                local_health={
+                    "follow_relay": follow_relay.snapshot()
+                    if follow_relay is not None
+                    else {"enabled": False},
+                },
+            )
             print(f"agent loop error: {exc}", flush=True)
         time.sleep(0.1)
 
