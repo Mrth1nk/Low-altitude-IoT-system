@@ -10,10 +10,13 @@ from aircraft_agent.telemetry import field, message_type
 class SlaveStateAggregator:
     """Builds the typed slave status from the sole MAVLink reader stream."""
 
-    def __init__(self, *, clock=time.time, heartbeat_freshness=3.0):
+    def __init__(self, *, clock=time.time, heartbeat_freshness=3.0, optical_gate=None):
         self.clock = clock
         self.heartbeat_freshness = float(heartbeat_freshness)
-        self._lock = threading.Lock()
+        self.optical_gate = optical_gate
+        self._lock = threading.RLock()
+        self._condition = threading.Condition(self._lock)
+        self._heartbeat_token = 0
         self._state = {
             "heartbeat_at": 0.0,
             "mode": "UNKNOWN",
@@ -36,9 +39,11 @@ class SlaveStateAggregator:
         now = float(self.clock())
         with self._lock:
             if kind == "HEARTBEAT":
+                self._heartbeat_token += 1
                 self._state["heartbeat_at"] = now
                 self._state["armed"] = bool(int(field(message, "base_mode", 0) or 0) & 128)
                 self._state["mode"] = self._mode(message)
+                self._condition.notify_all()
             elif kind == "GLOBAL_POSITION_INT":
                 lat = int(field(message, "lat", 0) or 0)
                 lon = int(field(message, "lon", 0) or 0)
@@ -80,16 +85,38 @@ class SlaveStateAggregator:
         with self._lock:
             self._state["fault"] = str(fault)[:160]
 
+    def heartbeat_token(self):
+        with self._lock:
+            return self._heartbeat_token
+
+    def wait_for_heartbeat(self, after_token, predicate, *, timeout):
+        deadline = time.monotonic() + float(timeout)
+        with self._condition:
+            while True:
+                if self._heartbeat_token > int(after_token):
+                    snapshot = self._snapshot_locked()
+                    if predicate(snapshot):
+                        return True
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    return False
+                self._condition.wait(remaining)
+
     def snapshot(self):
         now = float(self.clock())
         with self._lock:
-            state = dict(self._state)
-            state["event"] = dict(self._state["event"])
+            state = self._snapshot_locked()
         connected = state["heartbeat_at"] > 0 and now - state["heartbeat_at"] <= self.heartbeat_freshness
+        gate = (
+            {"blocked": False, "state": "CLEAR", "reason": ""}
+            if self.optical_gate is None
+            else self.optical_gate.snapshot()
+        )
+        blocked = bool(gate.get("blocked", False))
         return {
             "online": connected,
             "fc_connected": connected,
-            "blocked": False,
+            "blocked": blocked,
             "mode": state["mode"],
             "armed": state["armed"],
             "heartbeat_at": state["heartbeat_at"],
@@ -103,9 +130,29 @@ class SlaveStateAggregator:
             "mission_stage": state["mission_stage"],
             "mission_id": state["mission_id"],
             "fault": state["fault"],
-            "link_state": "ONLINE" if connected else "OFFLINE",
+            "link_state": (
+                "OPTICAL_BLOCKED"
+                if blocked
+                else ("ONLINE" if connected else "OFFLINE")
+            ),
             "event": state["event"],
         }
+
+    def record_stage(self, entry):
+        stage = str(entry.get("stage", ""))
+        mission_id = str(entry.get("mission_id", ""))
+        self.record_event(
+            "MISSION" if mission_id else "COMMAND",
+            stage,
+            sequence=int(entry.get("sequence", 0)),
+            mission_id=mission_id,
+            stage=stage,
+        )
+
+    def _snapshot_locked(self):
+        state = dict(self._state)
+        state["event"] = dict(self._state["event"])
+        return state
 
     @staticmethod
     def _mode(message):

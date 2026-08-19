@@ -13,6 +13,21 @@ class NoOpOpticalGateTests(unittest.TestCase):
 
 
 class SlaveStateAggregatorTests(unittest.TestCase):
+    def test_status_uses_the_injected_optical_gate(self):
+        from slave_agent.state import SlaveStateAggregator
+
+        class Gate:
+            def snapshot(self):
+                return {"blocked": True, "state": "BLOCKED", "reason": "reserved"}
+
+        state = SlaveStateAggregator(clock=lambda: 100.0, optical_gate=Gate())
+        state.update({"type": "HEARTBEAT", "mode": "GUIDED", "base_mode": 0})
+
+        snapshot = state.snapshot()
+
+        self.assertTrue(snapshot["blocked"])
+        self.assertEqual(snapshot["link_state"], "OPTICAL_BLOCKED")
+
     def test_aggregates_real_flight_controller_telemetry(self):
         from slave_agent.state import SlaveStateAggregator
 

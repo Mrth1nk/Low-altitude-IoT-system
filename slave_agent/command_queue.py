@@ -33,11 +33,26 @@ class ThreadSafeInbox:
     def __init__(self, inbox):
         self._inbox = inbox
         self._lock = threading.RLock()
+        self._active_callback = None
+        self._executing = set()
+
+    def set_active_callback(self, callback):
+        self._active_callback = callback
 
     @property
     def active(self):
         with self._lock:
-            return self._inbox.active
+            active = self._inbox.active
+            if active is None:
+                return None
+            command_id = active.get("command_id", "")
+            notify = command_id not in self._executing
+            if notify:
+                self._executing.add(command_id)
+            callback = self._active_callback
+        if notify and callback is not None:
+            callback(active)
+        return active
 
     @property
     def queue_depth(self):
@@ -92,18 +107,42 @@ class ThreadSafeInbox:
 class NodeCommandQueue:
     """Validates node transactions and adapts them to durable LIOT frames."""
 
-    def __init__(self, inbox, *, clock, max_age=3.0, max_future_skew=1.0):
+    def __init__(
+        self,
+        inbox,
+        *,
+        clock,
+        max_age=3.0,
+        max_future_skew=1.0,
+        delivery_store=None,
+        stage_callback=None,
+        optical_gate=None,
+        max_delivery_records=512,
+    ):
         self.inbox = inbox
         self.clock = clock
         self.max_age = float(max_age)
         self.max_future_skew = float(max_future_skew)
         self._lock = threading.Lock()
         self._identities = {}
+        self.delivery_store = delivery_store
+        self.stage_callback = stage_callback
+        self.optical_gate = optical_gate
+        self.max_delivery_records = int(max_delivery_records)
+        self._delivery = (
+            {"version": 1, "commands": {}}
+            if delivery_store is None
+            else delivery_store.load({"version": 1, "commands": {}})
+        )
+        self._delivery.setdefault("commands", {})
+        self.inbox.set_active_callback(self._active_started)
 
     def accept(self, message):
         message = validate_node_message(message, expected_target="aircraft_2")
         if message["source"] != "rover":
             raise CommandRejected("invalid_source")
+        if self.optical_gate is not None and not self.optical_gate.allows_commands():
+            raise CommandRejected("optical_blocked")
         age = float(self.clock()) - float(message["timestamp"])
         if age > self.max_age:
             raise CommandRejected("expired")
@@ -111,12 +150,20 @@ class NodeCommandQueue:
             raise CommandRejected("future_timestamp")
         try:
             with self._lock:
+                self._emit_stage("RECEIVED", message)
+                if message["type"] == "command":
+                    duplicate = self._deduplicate_command(message)
+                    if duplicate is not None:
+                        self._emit_stage(duplicate.stage, message)
+                        return duplicate
                 result = self._accept_locked(message)
                 if message["type"] in ("command", "mission_commit"):
                     self._identities[message["command_id"]] = {
                         "sequence": message["sequence"],
                         "reported": 0,
                     }
+                    self._record_delivery(message, result.stage)
+                self._emit_stage(result.stage, message)
                 return result
         except InboxRejected as exc:
             raise CommandRejected(exc.reason, missing=exc.missing) from exc
@@ -130,12 +177,48 @@ class NodeCommandQueue:
         completed = []
         with self._lock:
             for result in self.inbox.results:
-                identity = self._identities.get(result.get("command_id"))
-                if identity is None or identity["reported"]:
+                command_id = result.get("command_id")
+                record = self._delivery["commands"].get(command_id)
+                if record is None:
                     continue
-                identity["reported"] = 1
-                completed.append({**result, "sequence": identity["sequence"]})
+                terminal = "VERIFIED" if result.get("stage") in ("COMPLETED", "VERIFIED") else "FAILED"
+                changed = record.get("terminal_stage") != terminal
+                record.update({
+                    "terminal_stage": terminal,
+                    "worker_stage": result.get("stage", ""),
+                    "detail": str(result.get("detail", "")),
+                    "delivered": False if changed else bool(record.get("delivered", False)),
+                })
+                if changed:
+                    self._emit_stage(
+                        terminal,
+                        {
+                            "command_id": command_id,
+                            "sequence": record["sequence"],
+                            "payload": {"mission_id": record.get("mission_id", "")},
+                        },
+                    )
+            self._save_delivery()
+            for command_id, record in self._delivery["commands"].items():
+                if not record.get("terminal_stage") or record.get("delivered"):
+                    continue
+                completed.append({
+                    "command_id": command_id,
+                    "sequence": record["sequence"],
+                    "stage": record.get("worker_stage") or record["terminal_stage"],
+                    "detail": record.get("detail", ""),
+                    "mission_id": record.get("mission_id", ""),
+                })
         return completed
+
+    def mark_delivered(self, result):
+        with self._lock:
+            record = self._delivery["commands"].get(str(result["command_id"]))
+            if record is None:
+                return False
+            record["delivered"] = True
+            self._save_delivery()
+            return True
 
     def _accept_locked(self, message):
         kind = message["type"]
@@ -148,6 +231,93 @@ class NodeCommandQueue:
         if kind == "mission_commit":
             return self._mission_commit(message)
         raise CommandRejected("unsupported_message")
+
+    def _deduplicate_command(self, message):
+        record = self._delivery["commands"].get(message["command_id"])
+        if record is None:
+            return None
+        fingerprint = self._command_fingerprint(message)
+        if record.get("fingerprint") != fingerprint:
+            raise CommandRejected("duplicate_conflict")
+        record["sequence"] = message["sequence"]
+        if record.get("terminal_stage"):
+            record["delivered"] = False
+        self._save_delivery()
+        return QueueAcceptance(
+            record.get("terminal_stage") or record.get("stage", "QUEUED"),
+            True,
+            message["sequence"],
+        )
+
+    def _record_delivery(self, message, stage):
+        command_id = message["command_id"]
+        mission_id = message.get("payload", {}).get("mission_id", "")
+        self._delivery["commands"][command_id] = {
+            "sequence": message["sequence"],
+            "stage": stage,
+            "mission_id": mission_id,
+            "fingerprint": (
+                self._command_fingerprint(message)
+                if message["type"] == "command"
+                else ""
+            ),
+            "terminal_stage": "",
+            "worker_stage": "",
+            "detail": "",
+            "delivered": False,
+            "updated_at": float(self.clock()),
+        }
+        self._trim_delivery()
+        self._save_delivery()
+
+    def _active_started(self, record):
+        self._emit_stage(
+            "EXECUTING",
+            {
+                "command_id": record.get("command_id", ""),
+                "sequence": self._delivery["commands"].get(
+                    record.get("command_id", ""), {}
+                ).get("sequence", 0),
+                "payload": {"mission_id": record.get("mission_id", "")},
+            },
+        )
+
+    def _emit_stage(self, stage, message):
+        if self.stage_callback is None:
+            return
+        payload = message.get("payload", {})
+        self.stage_callback({
+            "stage": str(stage),
+            "command_id": str(message.get("command_id", "")),
+            "sequence": int(message.get("sequence", 0)),
+            "mission_id": str(payload.get("mission_id", "")),
+        })
+
+    def _save_delivery(self):
+        if self.delivery_store is not None:
+            self.delivery_store.save(self._delivery)
+
+    def _trim_delivery(self):
+        commands = self._delivery["commands"]
+        if len(commands) <= self.max_delivery_records:
+            return
+        oldest = sorted(
+            commands,
+            key=lambda command_id: commands[command_id].get("updated_at", 0.0),
+        )[: len(commands) - self.max_delivery_records]
+        for command_id in oldest:
+            del commands[command_id]
+
+    @staticmethod
+    def _command_fingerprint(message):
+        return hashlib.sha256(
+            json.dumps(
+                message["payload"],
+                sort_keys=True,
+                separators=(",", ":"),
+                allow_nan=False,
+            ).encode("utf-8")
+        ).hexdigest()
 
     def _mission_begin(self, message):
         payload = message["payload"]
@@ -261,3 +431,37 @@ class NodeCommandQueue:
             uuid.UUID(message["command_id"]),
             payload,
         )
+
+
+class VerifiedOperations:
+    """Requires a post-command heartbeat before mode/arm succeeds."""
+
+    def __init__(self, delegate, state, *, verification_timeout=2.0):
+        self.delegate = delegate
+        self.state = state
+        self.verification_timeout = float(verification_timeout)
+
+    def set_mode(self, mode):
+        token = self.state.heartbeat_token()
+        result = self.delegate.set_mode(mode)
+        if not self.state.wait_for_heartbeat(
+            token,
+            lambda snapshot: snapshot["mode"] == str(mode).upper(),
+            timeout=self.verification_timeout,
+        ):
+            raise TimeoutError(f"fresh heartbeat did not confirm mode {mode}")
+        return result
+
+    def arm(self, value):
+        token = self.state.heartbeat_token()
+        result = self.delegate.arm(value)
+        if not self.state.wait_for_heartbeat(
+            token,
+            lambda snapshot: snapshot["armed"] is bool(value),
+            timeout=self.verification_timeout,
+        ):
+            raise TimeoutError("fresh heartbeat did not confirm armed state")
+        return result
+
+    def execute(self, record, start_auto=False):
+        return self.delegate.execute(record, start_auto=start_auto)

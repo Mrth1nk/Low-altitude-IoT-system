@@ -41,7 +41,7 @@ class Operations:
 
 
 class SlaveCommandQueueTests(unittest.TestCase):
-    def make_queue(self, tmp, *, max_queue=2, now=100.0):
+    def make_queue(self, tmp, *, max_queue=2, now=100.0, stages=None, gate=None):
         from slave_agent.command_queue import NodeCommandQueue, ThreadSafeInbox
 
         inbox = ThreadSafeInbox(DurableInbox(
@@ -49,7 +49,14 @@ class SlaveCommandQueueTests(unittest.TestCase):
         ))
         operations = Operations()
         worker = AircraftCommandWorker(inbox, operations, start_thread=False)
-        queue = NodeCommandQueue(inbox, clock=lambda: now, max_age=3.0)
+        queue = NodeCommandQueue(
+            inbox,
+            clock=lambda: now,
+            max_age=3.0,
+            delivery_store=AtomicJsonStore(Path(tmp) / "delivery.json"),
+            stage_callback=None if stages is None else stages.append,
+            optical_gate=gate,
+        )
         return queue, inbox, worker, operations
 
     def test_expired_command_is_rejected_before_durable_accept(self):
@@ -85,6 +92,32 @@ class SlaveCommandQueueTests(unittest.TestCase):
             self.assertFalse(accepted.duplicate)
             self.assertTrue(duplicate.duplicate)
             self.assertEqual(inbox.queue_depth, 1)
+
+    def test_simple_command_deduplicates_by_command_id_across_sequences(self):
+        from slave_agent.command_queue import CommandRejected
+
+        with tempfile.TemporaryDirectory() as tmp:
+            queue, inbox, _worker, _operations = self.make_queue(tmp)
+            command_id = uuid.uuid4()
+            first = build_command_message(
+                action="guided", **identity(command_id, sequence=60)
+            )
+            retry = build_command_message(
+                action="guided", **identity(command_id, sequence=61)
+            )
+            conflict = build_command_message(
+                action="land", **identity(command_id, sequence=62)
+            )
+
+            accepted = queue.accept(first)
+            duplicate = queue.accept(retry)
+            with self.assertRaisesRegex(CommandRejected, "duplicate_conflict"):
+                queue.accept(conflict)
+
+            self.assertFalse(accepted.duplicate)
+            self.assertTrue(duplicate.duplicate)
+            self.assertEqual(duplicate.sequence, 61)
+            self.assertEqual(inbox.queue_depth, 0)
 
     def test_mode_and_arm_commands_execute_through_existing_worker(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -250,6 +283,72 @@ class SlaveCommandQueueTests(unittest.TestCase):
             self.assertTrue(duplicate.duplicate)
             self.assertEqual(duplicate.sequence, 52)
 
+    def test_terminal_ack_survives_restart_until_delivery_is_confirmed(self):
+        from slave_agent.command_queue import NodeCommandQueue, ThreadSafeInbox
+
+        with tempfile.TemporaryDirectory() as tmp:
+            inbox_path = Path(tmp) / "inbox.json"
+            delivery_path = Path(tmp) / "delivery.json"
+            command_id = uuid.uuid4()
+            inbox = ThreadSafeInbox(DurableInbox(AtomicJsonStore(inbox_path)))
+            queue = NodeCommandQueue(
+                inbox,
+                clock=lambda: 100.0,
+                delivery_store=AtomicJsonStore(delivery_path),
+            )
+            worker = AircraftCommandWorker(inbox, Operations(), start_thread=False)
+            queue.accept(build_command_message(
+                action="guided", **identity(command_id, sequence=70)
+            ))
+            worker.run_once()
+
+            restarted = NodeCommandQueue(
+                ThreadSafeInbox(DurableInbox(AtomicJsonStore(inbox_path))),
+                clock=lambda: 100.0,
+                delivery_store=AtomicJsonStore(delivery_path),
+            )
+            pending = restarted.completed()
+
+            self.assertEqual(pending[0]["command_id"], str(command_id))
+            self.assertEqual(pending[0]["sequence"], 70)
+            self.assertEqual(pending[0]["stage"], "COMPLETED")
+            restarted.mark_delivered(pending[0])
+            delivered_restart = NodeCommandQueue(
+                ThreadSafeInbox(DurableInbox(AtomicJsonStore(inbox_path))),
+                clock=lambda: 100.0,
+                delivery_store=AtomicJsonStore(delivery_path),
+            )
+            self.assertEqual(delivered_restart.completed(), [])
+
+    def test_command_lifecycle_exposes_all_real_stages(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            stages = []
+            queue, _inbox, worker, _operations = self.make_queue(tmp, stages=stages)
+            queue.accept(build_command_message(action="guided", **identity(sequence=80)))
+            worker.run_once()
+            queue.completed()
+
+            self.assertEqual(
+                [entry["stage"] for entry in stages],
+                ["RECEIVED", "QUEUED", "EXECUTING", "VERIFIED"],
+            )
+            self.assertTrue(all(entry["mission_id"] == "" for entry in stages))
+
+    def test_optical_gate_participates_in_command_admission(self):
+        from slave_agent.command_queue import CommandRejected
+
+        class Gate:
+            def allows_commands(self):
+                return False
+
+        with tempfile.TemporaryDirectory() as tmp:
+            queue, inbox, _worker, _operations = self.make_queue(tmp, gate=Gate())
+
+            with self.assertRaisesRegex(CommandRejected, "optical_blocked"):
+                queue.accept(build_command_message(action="guided", **identity()))
+
+            self.assertIsNone(inbox.active)
+
     def test_thread_safe_adapter_serializes_access(self):
         from slave_agent.command_queue import ThreadSafeInbox
 
@@ -275,6 +374,51 @@ class SlaveCommandQueueTests(unittest.TestCase):
             thread.join()
 
         self.assertFalse(probe.overlap)
+
+
+class VerifiedOperationsTests(unittest.TestCase):
+    def test_mode_and_arm_require_a_fresh_matching_heartbeat(self):
+        from slave_agent.command_queue import VerifiedOperations
+        from slave_agent.state import SlaveStateAggregator
+
+        state = SlaveStateAggregator(clock=lambda: 100.0)
+        state.update({"type": "HEARTBEAT", "mode": "STABILIZE", "base_mode": 0})
+        delegate = Operations()
+        operations = VerifiedOperations(delegate, state, verification_timeout=0.5)
+
+        mode_result = []
+        mode_thread = threading.Thread(
+            target=lambda: mode_result.append(operations.set_mode("GUIDED"))
+        )
+        mode_thread.start()
+        threading.Event().wait(0.02)
+        state.update({"type": "HEARTBEAT", "mode": "GUIDED", "base_mode": 0})
+        mode_thread.join(1)
+
+        arm_result = []
+        arm_thread = threading.Thread(
+            target=lambda: arm_result.append(operations.arm(True))
+        )
+        arm_thread.start()
+        threading.Event().wait(0.02)
+        state.update({"type": "HEARTBEAT", "mode": "GUIDED", "base_mode": 128})
+        arm_thread.join(1)
+
+        self.assertFalse(mode_thread.is_alive())
+        self.assertFalse(arm_thread.is_alive())
+        self.assertEqual(len(mode_result), 1)
+        self.assertEqual(len(arm_result), 1)
+
+    def test_stale_precommand_heartbeat_cannot_verify_mode(self):
+        from slave_agent.command_queue import VerifiedOperations
+        from slave_agent.state import SlaveStateAggregator
+
+        state = SlaveStateAggregator(clock=lambda: 100.0)
+        state.update({"type": "HEARTBEAT", "mode": "GUIDED", "base_mode": 0})
+        operations = VerifiedOperations(Operations(), state, verification_timeout=0.01)
+
+        with self.assertRaisesRegex(TimeoutError, "fresh heartbeat"):
+            operations.set_mode("GUIDED")
 
 
 if __name__ == "__main__":
