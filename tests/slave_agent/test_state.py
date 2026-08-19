@@ -86,6 +86,23 @@ class SlaveStateAggregatorTests(unittest.TestCase):
 
         self.assertIn("telemetry_update", state.snapshot()["fault"])
 
+    def test_plain_command_stage_clears_previous_mission_id(self):
+        from slave_agent.state import SlaveStateAggregator
+
+        state = SlaveStateAggregator(clock=lambda: 100.0)
+        state.record_stage({
+            "stage": "FAILED", "command_id": "m", "sequence": 1,
+            "mission_id": "old-mission",
+        })
+        state.record_stage({
+            "stage": "QUEUED", "command_id": "c", "sequence": 2,
+            "mission_id": "",
+        })
+
+        snapshot = state.snapshot()
+        self.assertEqual(snapshot["mission_id"], "")
+        self.assertEqual(snapshot["mission_stage"], "QUEUED")
+
 
 if __name__ == "__main__":
     unittest.main()

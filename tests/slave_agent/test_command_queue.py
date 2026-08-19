@@ -40,6 +40,30 @@ class Operations:
         self.calls.append(("mission", record, start_auto))
 
 
+class MemoryStore:
+    def __init__(self, *, fail_on_save=None, events=None, name="store"):
+        self.value = None
+        self.save_count = 0
+        self.fail_on_save = fail_on_save
+        self.events = events
+        self.name = name
+
+    def load(self, default):
+        import copy
+
+        return copy.deepcopy(default if self.value is None else self.value)
+
+    def save(self, value):
+        import copy
+
+        self.save_count += 1
+        if self.events is not None:
+            self.events.append(self.name)
+        if self.fail_on_save == self.save_count:
+            raise OSError(f"{self.name} save failed")
+        self.value = copy.deepcopy(value)
+
+
 class SlaveCommandQueueTests(unittest.TestCase):
     def make_queue(self, tmp, *, max_queue=2, now=100.0, stages=None, gate=None):
         from slave_agent.command_queue import NodeCommandQueue, ThreadSafeInbox
@@ -92,6 +116,56 @@ class SlaveCommandQueueTests(unittest.TestCase):
             self.assertFalse(accepted.duplicate)
             self.assertTrue(duplicate.duplicate)
             self.assertEqual(inbox.queue_depth, 1)
+
+    def test_delivery_is_durable_before_inbox_becomes_worker_visible(self):
+        from slave_agent.command_queue import NodeCommandQueue, ThreadSafeInbox
+
+        events = []
+        inbox_store = MemoryStore(events=events, name="inbox")
+        delivery_store = MemoryStore(events=events, name="delivery")
+        inbox = ThreadSafeInbox(DurableInbox(inbox_store))
+        queue = NodeCommandQueue(
+            inbox, clock=lambda: 100.0, delivery_store=delivery_store
+        )
+
+        queue.accept(build_command_message(action="guided", **identity()))
+
+        self.assertEqual(events[:2], ["delivery", "inbox"])
+        self.assertIsNotNone(inbox.active)
+
+    def test_delivery_save_failure_never_exposes_command_to_worker(self):
+        from slave_agent.command_queue import NodeCommandQueue, ThreadSafeInbox
+
+        inbox = ThreadSafeInbox(DurableInbox(MemoryStore()))
+        delivery_store = MemoryStore(fail_on_save=1, name="delivery")
+        operations = Operations()
+        worker = AircraftCommandWorker(inbox, operations, start_thread=False)
+        queue = NodeCommandQueue(
+            inbox, clock=lambda: 100.0, delivery_store=delivery_store
+        )
+
+        with self.assertRaisesRegex(OSError, "delivery save failed"):
+            queue.accept(build_command_message(action="guided", **identity()))
+
+        self.assertIsNone(inbox.active)
+        self.assertIsNone(worker.run_once())
+        self.assertEqual(operations.calls, [])
+
+    def test_inbox_save_failure_rolls_back_precommitted_delivery(self):
+        from slave_agent.command_queue import NodeCommandQueue, ThreadSafeInbox
+
+        inbox_store = MemoryStore(fail_on_save=1, name="inbox")
+        delivery_store = MemoryStore(name="delivery")
+        inbox = ThreadSafeInbox(DurableInbox(inbox_store))
+        queue = NodeCommandQueue(
+            inbox, clock=lambda: 100.0, delivery_store=delivery_store
+        )
+
+        with self.assertRaisesRegex(OSError, "inbox save failed"):
+            queue.accept(build_command_message(action="guided", **identity()))
+
+        self.assertIsNone(inbox.active)
+        self.assertEqual(delivery_store.value["commands"], {})
 
     def test_simple_command_deduplicates_by_command_id_across_sequences(self):
         from slave_agent.command_queue import CommandRejected
@@ -282,6 +356,76 @@ class SlaveCommandQueueTests(unittest.TestCase):
             self.assertFalse(first.duplicate)
             self.assertTrue(duplicate.duplicate)
             self.assertEqual(duplicate.sequence, 52)
+
+    def test_completed_mission_commit_deduplicates_durably_after_restart(self):
+        from slave_agent.command_queue import NodeCommandQueue, ThreadSafeInbox
+
+        with tempfile.TemporaryDirectory() as tmp:
+            inbox_path = Path(tmp) / "inbox.json"
+            delivery_path = Path(tmp) / "delivery.json"
+            command_id = uuid.uuid4()
+            mission_id = "durable-commit"
+            items = [{"index": 0, "lat": 32.1, "lon": 118.9, "alt": 10.0}]
+            digest = mission_digest(items)
+            common = identity(command_id)
+            inbox = ThreadSafeInbox(DurableInbox(AtomicJsonStore(inbox_path)))
+            queue = NodeCommandQueue(
+                inbox, clock=lambda: 100.0,
+                delivery_store=AtomicJsonStore(delivery_path),
+            )
+            worker = AircraftCommandWorker(inbox, Operations(), start_thread=False)
+            queue.accept(build_mission_begin_message(
+                mission_id=mission_id, item_count=1, digest=digest,
+                **{**common, "sequence": 90},
+            ))
+            queue.accept(build_mission_item_message(
+                mission_id=mission_id, index=0, item=items[0],
+                **{**common, "sequence": 91},
+            ))
+            commit = build_mission_commit_message(
+                mission_id=mission_id, item_count=1, digest=digest,
+                **{**common, "sequence": 92},
+            )
+            queue.accept(commit)
+            worker.run_once()
+            terminal = queue.completed()[0]
+            queue.mark_delivered(terminal)
+
+            restarted = NodeCommandQueue(
+                ThreadSafeInbox(DurableInbox(AtomicJsonStore(inbox_path))),
+                clock=lambda: 100.0,
+                delivery_store=AtomicJsonStore(delivery_path),
+            )
+            retry = build_mission_commit_message(
+                mission_id=mission_id, item_count=1, digest=digest,
+                **{**common, "sequence": 99},
+            )
+            accepted = restarted.accept(retry)
+            recovered = restarted.completed()
+
+            self.assertTrue(accepted.duplicate)
+            self.assertEqual(accepted.stage, "VERIFIED")
+            self.assertEqual(recovered[0]["sequence"], 99)
+            self.assertEqual(recovered[0]["mission_id"], mission_id)
+
+    def test_completed_does_not_save_when_worker_results_are_unchanged(self):
+        from slave_agent.command_queue import NodeCommandQueue, ThreadSafeInbox
+
+        inbox = ThreadSafeInbox(DurableInbox(MemoryStore()))
+        delivery_store = MemoryStore()
+        queue = NodeCommandQueue(
+            inbox, clock=lambda: 100.0, delivery_store=delivery_store
+        )
+        worker = AircraftCommandWorker(inbox, Operations(), start_thread=False)
+        queue.accept(build_command_message(action="guided", **identity()))
+        worker.run_once()
+
+        queue.completed()
+        saves_after_transition = delivery_store.save_count
+        for _ in range(100):
+            queue.completed()
+
+        self.assertEqual(delivery_store.save_count, saves_after_transition)
 
     def test_terminal_ack_survives_restart_until_delivery_is_confirmed(self):
         from slave_agent.command_queue import NodeCommandQueue, ThreadSafeInbox

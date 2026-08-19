@@ -72,7 +72,6 @@ class SlaveStateAggregator:
         with self._lock:
             if stage is not None:
                 self._state["mission_stage"] = str(stage)
-            if mission_id:
                 self._state["mission_id"] = str(mission_id)
             self._state["event"] = {
                 "timestamp": now,

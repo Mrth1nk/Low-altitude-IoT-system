@@ -103,6 +103,20 @@ class ThreadSafeInbox:
                     return copy.deepcopy(record)
         return None
 
+    def contains_command(self, command_id):
+        command_id = str(command_id)
+        with self._lock:
+            records = [
+                self._inbox._state.get("active"),
+                *self._inbox._state.get("queue", []),
+                *self._inbox._state.get("results", []),
+            ]
+            return any(
+                isinstance(record, dict)
+                and record.get("command_id") == command_id
+                for record in records
+            )
+
 
 class NodeCommandQueue:
     """Validates node transactions and adapts them to durable LIOT frames."""
@@ -135,6 +149,7 @@ class NodeCommandQueue:
             else delivery_store.load({"version": 1, "commands": {}})
         )
         self._delivery.setdefault("commands", {})
+        self._reconcile_delivery()
         self.inbox.set_active_callback(self._active_started)
 
     def accept(self, message):
@@ -151,18 +166,23 @@ class NodeCommandQueue:
         try:
             with self._lock:
                 self._emit_stage("RECEIVED", message)
-                if message["type"] == "command":
-                    duplicate = self._deduplicate_command(message)
+                tracked = message["type"] in ("command", "mission_commit")
+                if tracked:
+                    duplicate = self._deduplicate_delivery(message)
                     if duplicate is not None:
                         self._emit_stage(duplicate.stage, message)
                         return duplicate
-                result = self._accept_locked(message)
-                if message["type"] in ("command", "mission_commit"):
-                    self._identities[message["command_id"]] = {
-                        "sequence": message["sequence"],
-                        "reported": 0,
-                    }
-                    self._record_delivery(message, result.stage)
+                previous_delivery = None
+                if tracked:
+                    previous_delivery = copy.deepcopy(self._delivery)
+                    self._record_delivery(message, "QUEUED")
+                try:
+                    result = self._accept_locked(message)
+                except Exception:
+                    if previous_delivery is not None:
+                        self._delivery = previous_delivery
+                        self._save_delivery()
+                    raise
                 self._emit_stage(result.stage, message)
                 return result
         except InboxRejected as exc:
@@ -176,6 +196,7 @@ class NodeCommandQueue:
         """Return newly persisted worker results with original wire identity."""
         completed = []
         with self._lock:
+            dirty = False
             for result in self.inbox.results:
                 command_id = result.get("command_id")
                 record = self._delivery["commands"].get(command_id)
@@ -183,12 +204,15 @@ class NodeCommandQueue:
                     continue
                 terminal = "VERIFIED" if result.get("stage") in ("COMPLETED", "VERIFIED") else "FAILED"
                 changed = record.get("terminal_stage") != terminal
-                record.update({
+                updated = {
                     "terminal_stage": terminal,
                     "worker_stage": result.get("stage", ""),
                     "detail": str(result.get("detail", "")),
                     "delivered": False if changed else bool(record.get("delivered", False)),
-                })
+                }
+                if any(record.get(key) != value for key, value in updated.items()):
+                    record.update(updated)
+                    dirty = True
                 if changed:
                     self._emit_stage(
                         terminal,
@@ -198,7 +222,8 @@ class NodeCommandQueue:
                             "payload": {"mission_id": record.get("mission_id", "")},
                         },
                     )
-            self._save_delivery()
+            if dirty:
+                self._save_delivery()
             for command_id, record in self._delivery["commands"].items():
                 if not record.get("terminal_stage") or record.get("delivered"):
                     continue
@@ -232,17 +257,21 @@ class NodeCommandQueue:
             return self._mission_commit(message)
         raise CommandRejected("unsupported_message")
 
-    def _deduplicate_command(self, message):
+    def _deduplicate_delivery(self, message):
         record = self._delivery["commands"].get(message["command_id"])
         if record is None:
             return None
-        fingerprint = self._command_fingerprint(message)
+        fingerprint = self._delivery_fingerprint(message)
         if record.get("fingerprint") != fingerprint:
             raise CommandRejected("duplicate_conflict")
+        changed = record.get("sequence") != message["sequence"]
         record["sequence"] = message["sequence"]
         if record.get("terminal_stage"):
+            changed = changed or bool(record.get("delivered"))
             record["delivered"] = False
-        self._save_delivery()
+        if changed:
+            record["updated_at"] = float(self.clock())
+            self._save_delivery()
         return QueueAcceptance(
             record.get("terminal_stage") or record.get("stage", "QUEUED"),
             True,
@@ -252,23 +281,25 @@ class NodeCommandQueue:
     def _record_delivery(self, message, stage):
         command_id = message["command_id"]
         mission_id = message.get("payload", {}).get("mission_id", "")
-        self._delivery["commands"][command_id] = {
-            "sequence": message["sequence"],
-            "stage": stage,
-            "mission_id": mission_id,
-            "fingerprint": (
-                self._command_fingerprint(message)
-                if message["type"] == "command"
-                else ""
-            ),
-            "terminal_stage": "",
-            "worker_stage": "",
-            "detail": "",
-            "delivered": False,
-            "updated_at": float(self.clock()),
-        }
-        self._trim_delivery()
-        self._save_delivery()
+        previous = copy.deepcopy(self._delivery)
+        try:
+            self._delivery["commands"][command_id] = {
+                "sequence": message["sequence"],
+                "stage": stage,
+                "mission_id": mission_id,
+                "message_type": message["type"],
+                "fingerprint": self._delivery_fingerprint(message),
+                "terminal_stage": "",
+                "worker_stage": "",
+                "detail": "",
+                "delivered": False,
+                "updated_at": float(self.clock()),
+            }
+            self._trim_delivery()
+            self._save_delivery()
+        except Exception:
+            self._delivery = previous
+            raise
 
     def _active_started(self, record):
         self._emit_stage(
@@ -318,6 +349,36 @@ class NodeCommandQueue:
                 allow_nan=False,
             ).encode("utf-8")
         ).hexdigest()
+
+    @staticmethod
+    def _delivery_fingerprint(message):
+        if message["type"] == "command":
+            return NodeCommandQueue._command_fingerprint(message)
+        return hashlib.sha256(
+            json.dumps(
+                {
+                    "type": message["type"],
+                    "payload": message["payload"],
+                },
+                sort_keys=True,
+                separators=(",", ":"),
+                allow_nan=False,
+            ).encode("utf-8")
+        ).hexdigest()
+
+    def _reconcile_delivery(self):
+        commands = self._delivery["commands"]
+        orphaned = [
+            command_id
+            for command_id, record in commands.items()
+            if not record.get("terminal_stage")
+            and not self.inbox.contains_command(command_id)
+        ]
+        if not orphaned:
+            return
+        for command_id in orphaned:
+            del commands[command_id]
+        self._save_delivery()
 
     def _mission_begin(self, message):
         payload = message["payload"]

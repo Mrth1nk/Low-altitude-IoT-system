@@ -221,6 +221,7 @@ class SlaveUdpLinkTests(unittest.TestCase):
                     "sequence": 23,
                     "stage": "VERIFIED",
                     "detail": "mission readback verified",
+                    "mission_id": "mission-verified-1",
                 }]
 
         from slave_agent.link import SlaveUdpLink
@@ -240,6 +241,32 @@ class SlaveUdpLinkTests(unittest.TestCase):
         self.assertEqual(messages[0]["payload"]["stage"], "VERIFIED")
         self.assertEqual(state.events[0][0], "MISSION")
         self.assertEqual(state.events[0][2]["stage"], "VERIFIED")
+
+    def test_failed_mission_result_remains_a_mission_event_with_id(self):
+        class FailedMissionQueue(Queue):
+            def completed(self):
+                return [{
+                    "command_id": str(uuid.uuid4()),
+                    "sequence": 24,
+                    "stage": "FAILED",
+                    "detail": "mission denied",
+                    "mission_id": "mission-failed-1",
+                }]
+
+        from slave_agent.link import SlaveUdpLink
+
+        sock = FakeSocket()
+        state = State()
+        link = SlaveUdpLink(
+            FailedMissionQueue(), state,
+            peer_ip="192.168.4.2", peer_port=14610, local_port=14620,
+            sock=sock, clock=lambda: 100.0,
+        )
+
+        link.publish_due()
+
+        self.assertEqual(state.events[0][0], "MISSION")
+        self.assertEqual(state.events[0][2]["mission_id"], "mission-failed-1")
 
     def test_receive_loop_does_not_wait_for_durable_accept(self):
         class BlockingQueue(Queue):

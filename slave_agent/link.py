@@ -119,13 +119,15 @@ class SlaveUdpLink:
             original_stage = result.get("stage")
             stage = "VERIFIED" if original_stage in ("COMPLETED", "VERIFIED") else "FAILED"
             detail = str(result.get("detail", ""))[:160]
-            event_type = "MISSION" if original_stage == "VERIFIED" else "COMMAND"
+            mission_id = str(result.get("mission_id", ""))
+            event_type = "MISSION" if mission_id else "COMMAND"
             record_event = getattr(self.state, "record_event", None)
             if callable(record_event):
                 record_event(
                     event_type,
                     detail or stage,
                     sequence=int(result["sequence"]),
+                    mission_id=mission_id,
                     stage=stage,
                 )
             message = build_ack_message(
