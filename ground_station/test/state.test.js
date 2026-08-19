@@ -14,6 +14,57 @@ const {
   transactionTimeline,
 } = require("../public/core.js");
 
+test("one cloud response independently normalizes main and slave aircraft state", () => {
+  const state = normalizeCloudState([
+    {code: "rover_state", value: JSON.stringify({
+      updated_at: 1710000000,
+      aircraft_link: true,
+      aircraft: {link_active: true, mode: "GUIDED", armed: false},
+    })},
+    {code: "slave_state", value: JSON.stringify({
+      updated_at: 1710000000.5,
+      online: true,
+      fc_connected: true,
+      blocked: false,
+      mode: "LOITER",
+      armed: true,
+      lat: 32.12,
+      lon: 118.95,
+      position_observed: true,
+      mission_stage: "VERIFIED",
+      event: {timestamp: 1710000000.5, sequence: 7, type: "HEARTBEAT", text: "LOITER armed=YES"},
+    })},
+  ], 1710000001000);
+
+  assert.equal(state.aircraft.mode, "GUIDED");
+  assert.equal(state.slave.mode, "LOITER");
+  assert.equal(state.slave.lng, 118.95);
+  assert.equal(state.slave.state_fresh, true);
+  assert.equal(aircraftCommandsAllowed(state, "aircraft"), true);
+  assert.equal(aircraftCommandsAllowed(state, "aircraft_2"), true);
+});
+
+test("stale slave disables only slave commands", () => {
+  const state = normalizeCloudState([
+    {code: "rover_state", value: JSON.stringify({
+      updated_at: 1710000000,
+      aircraft_link: true,
+      aircraft: {link_active: true, mode: "GUIDED", armed: false},
+    })},
+    {code: "slave_state", value: JSON.stringify({
+      updated_at: 1709999990,
+      online: true,
+      fc_connected: true,
+      mode: "LOITER",
+    })},
+  ], 1710000001000);
+
+  assert.equal(state.slave.state_fresh, false);
+  assert.equal(state.slave.status, "OFFLINE");
+  assert.equal(aircraftCommandsAllowed(state, "aircraft_2"), false);
+  assert.equal(aircraftCommandsAllowed(state, "aircraft"), true);
+});
+
 test("formats observed zero position without making it navigable", () => {
   assert.equal(formatObservedPosition({lat: 0, lng: 0, position_observed: true}), "0.00000, 0.00000");
   assert.equal(formatObservedPosition({lat: 0, lng: 0, position_observed: false}), "-");
@@ -25,6 +76,18 @@ test("hidden UI states cannot be overridden by component display rules", () => {
     "utf8",
   );
   assert.match(css, /\[hidden\]\s*\{\s*display:\s*none\s*!important;\s*\}/);
+});
+
+test("ground station exposes three map targets and two aircraft tabs", () => {
+  const html = fs.readFileSync(
+    path.join(__dirname, "../public/index.html"),
+    "utf8",
+  );
+  assert.match(html, /id="roverWaypointMode"[^>]*>\s*小车/);
+  assert.match(html, /id="aircraftWaypointMode"[^>]*>\s*主机/);
+  assert.match(html, /id="slaveWaypointMode"[^>]*>\s*从机/);
+  assert.match(html, /id="mainAircraftTab"[^>]*>\s*主机 1/);
+  assert.match(html, /id="slaveAircraftTab"[^>]*>\s*从机 2/);
 });
 
 test("normalizes rover_state while preserving filtered raw properties", () => {

@@ -104,3 +104,31 @@ test("transient Tuya failure serves the last state and keeps aging it", async ()
   assert.equal(degraded.state_age_sec, 4.5);
   assert.equal(degraded.state_fresh, true);
 });
+
+test("cached slave freshness ages independently while rover remains fresh", async () => {
+  let now = 12_000;
+  const instance = createStateReader({
+    endpoints,
+    cacheTtlMs: 2_000,
+    now: () => now,
+    request: async () => ({result: {updated_at: 10}}),
+    normalize: () => ({
+      online: true,
+      telemetry: {updated_at: 10},
+      aircraft: {link_active: true},
+      slave: {updated_at: 9, online: true, link_active: true, state_fresh: true},
+    }),
+    preserve: (_previous, next) => next,
+  });
+
+  const first = await instance();
+  assert.equal(first.state_fresh, true);
+  assert.equal(first.slave.state_fresh, true);
+
+  now = 13_500;
+  const second = await instance();
+  assert.equal(second.state_fresh, true);
+  assert.equal(second.slave.state_fresh, false);
+  assert.equal(second.slave.status, "OFFLINE");
+  assert.equal(second.aircraft.link_active, true);
+});

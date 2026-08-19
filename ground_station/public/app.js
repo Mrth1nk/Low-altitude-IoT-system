@@ -8,6 +8,7 @@ const els = {
   aircraftMessages: $("aircraftMessages"),
   aircraftMode: $("aircraftWaypointMode"),
   aircraftTimeline: $("aircraftTimeline"),
+  aircraftPanelTitle: $("aircraftPanelTitle"),
   altitude: $("altitudeInput"),
   arrivalModal: $("arrivalModal"),
   arrivalSummary: $("arrivalSummary"),
@@ -20,11 +21,14 @@ const els = {
   lng: $("lngInput"),
   log: $("log"),
   opticalBadge: $("opticalBadge"),
+  mainAircraftTab: $("mainAircraftTab"),
   queue: $("waypointQueue"),
   queueSummary: $("queueSummary"),
   roverGrid: $("statusGrid"),
   roverMode: $("roverWaypointMode"),
   roverTimeline: $("roverTimeline"),
+  slaveAircraftTab: $("slaveAircraftTab"),
+  slaveMode: $("slaveWaypointMode"),
   speed: $("speedInput"),
   speedField: $("speedField"),
   taskBanner: $("taskBanner"),
@@ -35,22 +39,26 @@ const els = {
 
 const FALLBACK = {lat: 32.11956, lng: 118.958406};
 const ARRIVAL_METERS = 3;
-const routes = {rover: [], aircraft: []};
-const messageHistory = [];
+const stores = Core.createGroundStationStores();
+const routes = stores.routes;
+const messageHistories = stores.messages;
 const alertKeys = new Set();
 let selectedVehicle = "rover";
+let selectedAircraft = "aircraft";
 let latestState = null;
 let currentTarget = {...FALLBACK};
 let map = null;
 let roverMarker = null;
 let aircraftMarker = null;
+let slaveMarker = null;
 let targetMarker = null;
 let roverPath = null;
 let aircraftPath = null;
+let slavePath = null;
 let roverTrackLine = null;
 let fenceCircle = null;
 let fallbackMarker = null;
-const waypointMarkers = {rover: [], aircraft: []};
+const waypointMarkers = {rover: [], aircraft: [], aircraft_2: []};
 let mapFallback = {...FALLBACK};
 let roverTrack = [];
 let arrivalKey = "";
@@ -102,12 +110,40 @@ function formatTime(seconds) {
 }
 
 function renderMessages() {
-  els.aircraftMessages.innerHTML = messageHistory.length
-    ? messageHistory.slice().reverse().map((item) => (
+  const history = messageHistories[selectedAircraft];
+  els.aircraftMessages.innerHTML = history.length
+    ? history.slice().reverse().map((item) => (
         `<div class="message-row"><time>${formatTime(item.time)}</time>`
         + `<strong>${escapeHtml(item.type)}</strong><span>${escapeHtml(item.text)}</span></div>`
       )).join("")
-    : '<div class="empty-state">等待飞机消息</div>';
+    : `<div class="empty-state">等待${selectedAircraft === "aircraft" ? "主机" : "从机"}消息</div>`;
+}
+
+function selectedAircraftState(state = latestState) {
+  return selectedAircraft === "aircraft_2" ? state?.slave || {} : state?.aircraft || {};
+}
+
+function collectAircraftMessages(state, target) {
+  const aircraft = target === "aircraft_2" ? state.slave || {} : state.aircraft || {};
+  const blocked = target === "aircraft_2"
+    ? Boolean(aircraft.blocked)
+    : Boolean(state.optical?.blocked);
+  const incoming = blocked
+    ? aircraft.messages
+    : target === "aircraft_2"
+      ? (aircraft.messages || []).map((message) => (
+          Core.aircraftHeartbeatSummary(message, aircraft.armed) || message
+        ))
+      : (aircraft.messages || [])
+          .map((message) => Core.aircraftHeartbeatSummary(message, aircraft.armed))
+          .filter(Boolean);
+  const history = messageHistories[target];
+  const merged = Core.appendAircraftMessages(
+    history,
+    incoming,
+    state.cloud_received_at,
+  );
+  history.splice(0, history.length, ...merged);
 }
 
 function aircraftDetails(aircraft) {
@@ -129,8 +165,12 @@ function aircraftDetails(aircraft) {
 
 function renderState(state) {
   latestState = state;
+  collectAircraftMessages(state, "aircraft");
+  collectAircraftMessages(state, "aircraft_2");
   const telemetry = state.telemetry || {};
-  const aircraft = state.aircraft || {};
+  const aircraft = selectedAircraftState(state);
+  els.mainAircraftTab.classList.toggle("online", Core.aircraftCommandsAllowed(state, "aircraft"));
+  els.slaveAircraftTab.classList.toggle("online", Core.aircraftCommandsAllowed(state, "aircraft_2"));
   els.cloudDot.classList.toggle("online", Boolean(state.online));
   const fresh = state.state_fresh === true;
   const age = Number(state.state_age_sec);
@@ -146,42 +186,34 @@ function renderState(state) {
     ["位置", Core.formatObservedPosition(telemetry)],
   ]);
   renderTimeline(els.roverTimeline, telemetry, "rover");
-  renderTimeline(els.aircraftTimeline, telemetry, "aircraft");
+  renderTimeline(
+    els.aircraftTimeline,
+    selectedAircraft === "aircraft_2" ? aircraft : telemetry,
+    selectedAircraft,
+  );
 
-  const blocked = Boolean(state.optical?.blocked);
+  const blocked = selectedAircraft === "aircraft_2"
+    ? Boolean(aircraft.blocked)
+    : Boolean(state.optical?.blocked);
+  const allowed = Core.aircraftCommandsAllowed(state, selectedAircraft);
   els.blocked.hidden = !blocked;
   els.aircraftContent.hidden = false;
-  els.opticalBadge.textContent = blocked ? "BLOCKED" : aircraft.status || "LOCKED";
-  els.opticalBadge.classList.toggle("locked", !blocked);
+  els.opticalBadge.textContent = blocked ? "BLOCKED" : aircraft.status || "OFFLINE";
+  els.opticalBadge.classList.toggle("locked", allowed);
   for (const button of document.querySelectorAll("[data-aircraft-command]")) {
-    button.disabled = blocked || !state.online;
-    button.title = blocked ? "OPTICAL LINK BLOCKED" : "";
+    button.disabled = !allowed;
+    button.title = blocked ? "OPTICAL LINK BLOCKED" : !allowed ? "AIRCRAFT OFFLINE" : "";
   }
   updateMissionButton();
   if (blocked) {
     els.aircraftGrid.innerHTML = "";
-    const merged = Core.appendAircraftMessages(
-      messageHistory,
-      aircraft.messages,
-      state.cloud_received_at,
-    );
-    messageHistory.splice(0, messageHistory.length, ...merged);
     renderMessages();
   } else {
     renderMetrics(els.aircraftGrid, aircraftDetails(aircraft));
-    const heartbeatMessages = aircraft.messages
-      .map((message) => Core.aircraftHeartbeatSummary(message, aircraft.armed))
-      .filter(Boolean);
-    const merged = Core.appendAircraftMessages(
-      messageHistory,
-      heartbeatMessages,
-      state.cloud_received_at,
-    );
-    messageHistory.splice(0, messageHistory.length, ...merged);
     renderMessages();
   }
 
-  updateMapFromState(telemetry, aircraft);
+  updateMapFromState(telemetry, state.aircraft || {}, state.slave || {});
   updateTaskBanner(telemetry, state.state_fresh === true);
   checkAlerts(telemetry);
   renderQueue();
@@ -288,12 +320,16 @@ function initMap() {
   }).addTo(map).bindTooltip("小车");
   aircraftMarker = L.circleMarker([FALLBACK.lat, FALLBACK.lng], {
     radius: 7, color: "#2463df", fillColor: "#fff", fillOpacity: 1, weight: 3,
-  }).addTo(map).bindTooltip("飞机");
+  }).addTo(map).bindTooltip("主机");
+  slaveMarker = L.circleMarker([FALLBACK.lat, FALLBACK.lng], {
+    radius: 7, color: "#b25d08", fillColor: "#fff", fillOpacity: 1, weight: 3,
+  }).addTo(map).bindTooltip("从机");
   targetMarker = L.circleMarker([FALLBACK.lat, FALLBACK.lng], {
     radius: 6, color: "#b25d08", fillOpacity: 0.2,
   }).addTo(map).bindTooltip("编辑点");
   roverPath = L.polyline([], {color: "#087f72", weight: 4}).addTo(map);
   aircraftPath = L.polyline([], {color: "#2463df", weight: 4, dashArray: "8 7"}).addTo(map);
+  slavePath = L.polyline([], {color: "#b25d08", weight: 4, dashArray: "4 7"}).addTo(map);
   roverTrackLine = L.polyline([], {color: "#0f766e", weight: 2, opacity: 0.45}).addTo(map);
   fenceCircle = L.circle([FALLBACK.lat, FALLBACK.lng], {
     radius: 50, color: "#d92d35", fillOpacity: 0.025, opacity: 0,
@@ -329,7 +365,7 @@ function setTarget(lat, lng) {
   if (targetMarker) targetMarker.setLatLng([currentTarget.lat, currentTarget.lng]);
 }
 
-function updateMapFromState(telemetry, aircraft) {
+function updateMapFromState(telemetry, aircraft, slave) {
   if (!map) return;
   if (validCoord(telemetry.lat, telemetry.lng)) {
     const point = {lat: Number(telemetry.lat), lng: Number(telemetry.lng)};
@@ -348,13 +384,16 @@ function updateMapFromState(telemetry, aircraft) {
   if (validCoord(aircraft.lat, aircraft.lng)) {
     aircraftMarker.setLatLng([Number(aircraft.lat), Number(aircraft.lng)]);
   }
+  if (validCoord(slave.lat, slave.lng)) {
+    slaveMarker.setLatLng([Number(slave.lat), Number(slave.lng)]);
+  }
   redrawRoutes();
 }
 
 function currentVehiclePosition(vehicle) {
   const source = vehicle === "aircraft"
     ? latestState?.aircraft
-    : latestState?.telemetry;
+    : vehicle === "aircraft_2" ? latestState?.slave : latestState?.telemetry;
   const lat = Number(source?.lat);
   const lng = Number(source?.lng);
   return validCoord(lat, lng) ? {lat, lng} : null;
@@ -371,7 +410,8 @@ function redrawRoutes() {
   if (!map) return;
   roverPath.setLatLngs(routes.rover.map((point) => [point.lat, point.lng]));
   aircraftPath.setLatLngs(routes.aircraft.map((point) => [point.lat, point.lng]));
-  for (const vehicle of ["rover", "aircraft"]) {
+  slavePath.setLatLngs(routes.aircraft_2.map((point) => [point.lat, point.lng]));
+  for (const vehicle of ["rover", "aircraft", "aircraft_2"]) {
     const distances = Core.routeSegmentDistances(
       routes[vehicle],
       currentVehiclePosition(vehicle),
@@ -379,7 +419,7 @@ function redrawRoutes() {
     for (const marker of waypointMarkers[vehicle]) map.removeLayer(marker);
     waypointMarkers[vehicle].length = 0;
     routes[vehicle].forEach((point, index) => {
-      const color = vehicle === "rover" ? "rover" : "aircraft";
+      const color = vehicle;
       const distance = distances[index];
       const distanceLabel = segmentDistanceLabel(distance, index);
       const pointLabel = point.autoReturn ? "返航点" : `航点 ${index + 1}`;
@@ -393,7 +433,7 @@ function redrawRoutes() {
         keyboard: false,
         zIndexOffset: 500 + index,
       }).addTo(map).bindTooltip(
-        `${vehicle === "rover" ? "小车" : "飞机"}${pointLabel}<br>${distanceLabel}`,
+        `${vehicle === "rover" ? "小车" : vehicle === "aircraft" ? "主机" : "从机"}${pointLabel}<br>${distanceLabel}`,
         {direction: "top", offset: [0, -12]},
       );
       waypointMarkers[vehicle].push(marker);
@@ -409,21 +449,33 @@ function redrawRoutes() {
 }
 
 function setVehicleMode(vehicle) {
-  selectedVehicle = vehicle === "aircraft" ? "aircraft" : "rover";
-  const aircraft = selectedVehicle === "aircraft";
-  els.roverMode.classList.toggle("active", !aircraft);
-  els.aircraftMode.classList.toggle("active", aircraft);
+  selectedVehicle = ["aircraft", "aircraft_2"].includes(vehicle) ? vehicle : "rover";
+  const aircraft = selectedVehicle !== "rover";
+  els.roverMode.classList.toggle("active", selectedVehicle === "rover");
+  els.aircraftMode.classList.toggle("active", selectedVehicle === "aircraft");
+  els.slaveMode.classList.toggle("active", selectedVehicle === "aircraft_2");
   els.speedField.hidden = aircraft;
   els.altitude.hidden = !aircraft;
-  els.uploadMission.textContent = aircraft ? "上传飞机任务" : "上传小车任务";
+  els.uploadMission.textContent = selectedVehicle === "rover"
+    ? "上传小车任务"
+    : selectedVehicle === "aircraft" ? "上传主机任务" : "上传从机任务";
   updateMissionButton();
   renderQueue();
 }
 
+function setAircraftTab(target) {
+  selectedAircraft = target === "aircraft_2" ? "aircraft_2" : "aircraft";
+  els.mainAircraftTab.classList.toggle("active", selectedAircraft === "aircraft");
+  els.slaveAircraftTab.classList.toggle("active", selectedAircraft === "aircraft_2");
+  els.aircraftPanelTitle.textContent = selectedAircraft === "aircraft" ? "主机任务" : "从机任务";
+  if (latestState) renderState(latestState);
+  else renderMessages();
+}
+
 function updateMissionButton() {
-  const blocked = selectedVehicle === "aircraft"
+  const blocked = selectedVehicle !== "rover"
     && latestState
-    && !Core.aircraftCommandsAllowed(latestState);
+    && !Core.aircraftCommandsAllowed(latestState, selectedVehicle);
   els.uploadMission.disabled = Boolean(blocked);
   els.uploadMission.title = blocked ? "OPTICAL LINK BLOCKED" : "";
 }
@@ -451,7 +503,8 @@ function addWaypoint() {
     arrivalKey = "";
     renderQueue();
     redrawRoutes();
-    showToast(`已加入${selectedVehicle === "rover" ? "小车" : "飞机"}航点`, "ok");
+    const label = selectedVehicle === "rover" ? "小车" : selectedVehicle === "aircraft" ? "主机" : "从机";
+    showToast(`已加入${label}航点`, "ok");
   } catch (error) {
     showToast(error.message, "danger");
   }
@@ -461,11 +514,13 @@ function currentMissionIndex() {
   const telemetry = latestState?.telemetry || {};
   const source = selectedVehicle === "aircraft"
     ? `${telemetry.aircraft_mission_status || ""} ${telemetry.aircraft_tx_stage || ""}`
-    : `${telemetry.mission_status || ""} ${telemetry.rover_tx_stage || ""}`;
+    : selectedVehicle === "aircraft_2"
+      ? `${latestState?.slave?.mission_status || ""} ${latestState?.slave?.mission_stage || ""}`
+      : `${telemetry.mission_status || ""} ${telemetry.rover_tx_stage || ""}`;
   const match = source.match(/(?:seq|current)[=: ]+(\d+)/i);
   if (!match) return -1;
   const protocolSeq = Number(match[1]);
-  return selectedVehicle === "aircraft"
+  return selectedVehicle !== "rover"
     ? Math.max(0, protocolSeq - 1)
     : Math.max(0, Math.floor((protocolSeq - 2) / 2));
 }
@@ -521,15 +576,15 @@ async function uploadMission() {
   let route = routes[selectedVehicle];
   try {
     if (
-      selectedVehicle === "aircraft"
-      && (!latestState || !Core.aircraftCommandsAllowed(latestState))
+      selectedVehicle !== "rover"
+      && (!latestState || !Core.aircraftCommandsAllowed(latestState, selectedVehicle))
     ) {
       throw new Error("OPTICAL LINK BLOCKED");
     }
-    if (selectedVehicle === "aircraft") {
-      const prepared = Core.prepareAircraftUploadRoute(route, latestState);
-      routes.aircraft.splice(0, routes.aircraft.length, ...prepared);
-      route = routes.aircraft;
+    if (selectedVehicle !== "rover") {
+      const prepared = Core.prepareAircraftUploadRoute(route, latestState, selectedVehicle);
+      routes[selectedVehicle].splice(0, routes[selectedVehicle].length, ...prepared);
+      route = routes[selectedVehicle];
       renderQueue();
       redrawRoutes();
     }
@@ -604,6 +659,9 @@ $("clearLogBtn").onclick = () => { els.log.textContent = ""; };
 $("closeArrivalModal").onclick = () => { els.arrivalModal.hidden = true; };
 els.roverMode.onclick = () => setVehicleMode("rover");
 els.aircraftMode.onclick = () => setVehicleMode("aircraft");
+els.slaveMode.onclick = () => setVehicleMode("aircraft_2");
+els.mainAircraftTab.onclick = () => setAircraftTab("aircraft");
+els.slaveAircraftTab.onclick = () => setAircraftTab("aircraft_2");
 els.fenceEnabled.onchange = redrawRoutes;
 els.fenceRadius.oninput = redrawRoutes;
 els.altitude.oninput = renderQueue;
@@ -615,11 +673,11 @@ for (const button of document.querySelectorAll("[data-command]")) {
 }
 for (const button of document.querySelectorAll("[data-aircraft-command]")) {
   button.onclick = () => {
-    if (!latestState || !Core.aircraftCommandsAllowed(latestState)) {
-      showToast("OPTICAL LINK BLOCKED", "danger");
+    if (!latestState || !Core.aircraftCommandsAllowed(latestState, selectedAircraft)) {
+      showToast(selectedAircraft === "aircraft" ? "OPTICAL LINK BLOCKED" : "SLAVE OFFLINE", "danger");
       return;
     }
-    postCommand({command: button.dataset.aircraftCommand, target: "aircraft"});
+    postCommand({command: button.dataset.aircraftCommand, target: selectedAircraft});
   };
 }
 for (const button of document.querySelectorAll("[data-steering]")) {
@@ -647,6 +705,7 @@ window.addEventListener("keyup", (event) => {
 });
 
 setVehicleMode("rover");
+setAircraftTab("aircraft");
 initMap();
 refresh();
 setInterval(refresh, 1000);

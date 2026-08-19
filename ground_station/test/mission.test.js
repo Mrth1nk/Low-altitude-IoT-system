@@ -5,12 +5,13 @@ const assert = require("node:assert/strict");
 
 const {
   buildMissionCommand,
+  createGroundStationStores,
   filterCommandProperties,
   isAircraftCommand,
   prepareAircraftUploadRoute,
   routeSegmentDistances,
 } = require("../public/core.js");
-const {buildCommandsBody, buildIssueBody} = require("../server.js");
+const {buildAircraftMissionFragments, buildCommandsBody, buildIssueBody} = require("../server.js");
 
 const points = [
   {lat: 32.1197, lng: 118.9531, speed: 0.8},
@@ -155,6 +156,78 @@ test("builds one aircraft mission with uniform altitude and does not request AUT
   assert.deepEqual(command.payload.items.map((item) => item.alt), [24, 24]);
   assert.deepEqual(command.payload.items.map((item) => item.command), [16, 16]);
   assert.equal(command.payload.start_auto, undefined);
+});
+
+test("builds slave mission and preserves aircraft_2 target in Tuya envelope", () => {
+  const command = buildMissionCommand("aircraft_2", points, {
+    altitude: 18,
+    commandId: "22112233-4455-4677-8899-aabbccddeeff",
+    missionId: "slave-demo",
+    timestamp: 1710000000000,
+  });
+  const envelope = JSON.parse(filterCommandProperties(command).command);
+
+  assert.equal(command.command, "aircraft_mission");
+  assert.equal(command.target, "aircraft_2");
+  assert.equal(command.payload.vehicle, "aircraft_2");
+  assert.equal(envelope.target, "aircraft_2");
+  assert.equal(envelope.payload.mission_id, "slave-demo");
+});
+
+test("every slave mission fragment keeps the aircraft_2 target", () => {
+  const command = buildMissionCommand("aircraft_2", points, {
+    altitude: 18,
+    commandId: "44112233-4455-4677-8899-aabbccddeeff",
+    missionId: "slave-fragments",
+  });
+  const fragments = buildAircraftMissionFragments(command);
+
+  assert.ok(fragments.length > 2);
+  assert.ok(fragments.every((fragment) => fragment.target === "aircraft_2"));
+  assert.equal(fragments[0].payload.vehicle, "aircraft_2");
+});
+
+test("simple slave command preserves aircraft_2 target in command envelope", () => {
+  const properties = filterCommandProperties({
+    command: "aircraft_guided",
+    target: "aircraft_2",
+    command_id: "33112233-4455-4677-8899-aabbccddeeff",
+  });
+
+  assert.deepEqual(JSON.parse(properties.command), {
+    command: "aircraft_guided",
+    command_id: "33112233-4455-4677-8899-aabbccddeeff",
+    target: "aircraft_2",
+  });
+});
+
+test("main and slave mission queues and message histories never share arrays", () => {
+  const stores = createGroundStationStores();
+  stores.routes.aircraft.push({lat: 1, lng: 2});
+  stores.messages.aircraft_2.push({text: "slave"});
+
+  assert.deepEqual(stores.routes.aircraft_2, []);
+  assert.deepEqual(stores.messages.aircraft, []);
+  assert.notEqual(stores.routes.aircraft, stores.routes.aircraft_2);
+  assert.notEqual(stores.messages.aircraft, stores.messages.aircraft_2);
+});
+
+test("slave return point uses slave current position without changing main return logic", () => {
+  const state = {
+    online: true,
+    state_fresh: true,
+    optical: {blocked: false},
+    aircraft: {link_active: true, lat: 32.1, lng: 118.9},
+    slave: {online: true, state_fresh: true, link_active: true, blocked: false, lat: 32.2, lng: 119.0},
+  };
+  const route = [{lat: 32.21, lng: 119.01}];
+
+  assert.deepEqual(prepareAircraftUploadRoute(route, state, "aircraft_2").at(-1), {
+    lat: 32.2, lng: 119.0, autoReturn: true,
+  });
+  assert.deepEqual(prepareAircraftUploadRoute(route, state).at(-1), {
+    lat: 32.1, lng: 118.9, autoReturn: true,
+  });
 });
 
 test("rejects invalid or oversized mission input before command creation", () => {

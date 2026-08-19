@@ -26,13 +26,14 @@
         <div><span class="eyebrow">ROVER</span><h2>小车任务</h2></div>
         <div class="mode-switch" role="group" aria-label="地图任务类型">
           <button id="roverWaypointMode" class="active" type="button">小车</button>
-          <button id="aircraftWaypointMode" type="button">飞机</button>
+          <button id="aircraftWaypointMode" type="button">主机</button>
+          <button id="slaveWaypointMode" type="button">从机</button>
         </div>
       </div>
 
       <div class="map-wrap">
         <div id="map"></div>
-        <div class="map-legend"><span class="rover-line">小车</span><span class="aircraft-line">飞机</span></div>
+        <div class="map-legend"><span class="rover-line">小车</span><span class="aircraft-line">主机</span><span class="slave-line">从机</span></div>
       </div>
 
       <div class="mission-editor">
@@ -78,8 +79,12 @@
 
     <section class="vehicle-panel aircraft-panel">
       <div class="section-heading">
-        <div><span class="eyebrow">AIRCRAFT</span><h2>飞机任务</h2></div>
+        <div><span class="eyebrow">AIRCRAFT</span><h2 id="aircraftPanelTitle">主机任务</h2></div>
         <span id="opticalBadge" class="badge">等待状态</span>
+      </div>
+      <div class="aircraft-tabs" role="tablist" aria-label="飞机选择">
+        <button id="mainAircraftTab" class="active" type="button" role="tab">主机 1</button>
+        <button id="slaveAircraftTab" type="button" role="tab">从机 2</button>
       </div>
       <div id="opticalBlocked" class="optical-blocked" hidden>OPTICAL LINK BLOCKED</div>
       <div id="aircraftContent">

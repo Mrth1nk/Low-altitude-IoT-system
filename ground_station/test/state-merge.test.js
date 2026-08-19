@@ -4,6 +4,42 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 const {preserveAircraftDetails} = require("../server.js");
 
+test("partial cloud properties retain main and slave caches independently", () => {
+  const previous = {
+    raw: {rover_state: "old-main", slave_state: "old-slave"},
+    properties_present: {rover_state: true, slave_state: true},
+    telemetry: {updated_at: 100, aircraft_link: true},
+    aircraft: {link_active: true, mode: "GUIDED", messages: [{text: "main"}]},
+    slave: {updated_at: 100, online: true, link_active: true, mode: "LOITER", messages: [{text: "slave"}]},
+  };
+  const roverOnly = {
+    raw: {rover_state: "new-main"},
+    properties_present: {rover_state: true, slave_state: false},
+    telemetry: {updated_at: 102, aircraft_link: true, last_command: "arm"},
+    aircraft: {link_active: true, mode: "AUTO", messages: [{text: "main-new"}]},
+    slave: {status: "OFFLINE", messages: []},
+  };
+  const mergedRover = preserveAircraftDetails(previous, roverOnly);
+
+  assert.equal(mergedRover.aircraft.mode, "AUTO");
+  assert.equal(mergedRover.slave.mode, "LOITER");
+  assert.deepEqual(mergedRover.slave.messages, [{text: "slave"}]);
+
+  const slaveOnly = {
+    raw: {slave_state: "new-slave"},
+    properties_present: {rover_state: false, slave_state: true},
+    telemetry: {},
+    aircraft: {link_active: false, messages: []},
+    slave: {updated_at: 103, online: true, link_active: true, mode: "AUTO", messages: [{text: "slave-new"}]},
+  };
+  const mergedSlave = preserveAircraftDetails(mergedRover, slaveOnly);
+
+  assert.equal(mergedSlave.telemetry.last_command, "arm");
+  assert.equal(mergedSlave.aircraft.mode, "AUTO");
+  assert.equal(mergedSlave.slave.mode, "AUTO");
+  assert.deepEqual(mergedSlave.aircraft.messages, [{text: "main-new"}]);
+});
+
 test("rover-only cloud update cannot erase active aircraft details", () => {
   const previous = {
     telemetry: {aircraft_link: true},

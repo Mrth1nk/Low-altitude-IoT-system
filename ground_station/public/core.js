@@ -19,6 +19,8 @@
     "throttle",
   ]);
   const AIRCRAFT_PREFIX = "aircraft_";
+  const SLAVE_TARGET = "aircraft_2";
+  const SLAVE_STALE_SECONDS = 3;
   const MAX_MISSION_ITEMS = 100;
   const MAV_CMD_NAV_WAYPOINT = 16;
   const MAV_CMD_DO_CHANGE_SPEED = 178;
@@ -55,6 +57,37 @@
     } catch {
       return {raw_rover_state: raw};
     }
+  }
+
+  function normalizeSlave(rawState, receivedAt) {
+    const source = parseRoverState(rawState);
+    const updatedAt = Number(source.updated_at || source.timestamp || 0);
+    const age = updatedAt > 0 ? Math.max(0, receivedAt - updatedAt) : null;
+    const fresh = age !== null && age <= SLAVE_STALE_SECONDS;
+    const blocked = source.blocked === true;
+    const event = source.event && typeof source.event === "object" ? source.event : null;
+    return {
+      ...source,
+      updated_at: updatedAt,
+      state_age_sec: age,
+      state_fresh: fresh,
+      online: fresh && source.online === true,
+      link_active: fresh && source.online === true && source.fc_connected !== false,
+      blocked,
+      status: !fresh || source.online !== true
+        ? "OFFLINE"
+        : blocked ? "OPTICAL LINK BLOCKED" : "ONLINE",
+      lng: source.lng ?? source.lon,
+      ground_speed: source.ground_speed ?? source.speed,
+      battery_percent: source.battery_percent ?? source.battery,
+      mission_status: source.mission_status ?? source.mission_stage,
+      messages: event ? [{
+        time: Number(event.timestamp) || updatedAt || receivedAt,
+        sequence: event.sequence,
+        type: String(event.type || "STATUS"),
+        text: String(event.text || ""),
+      }] : [],
+    };
   }
 
   function opticalBlocked(telemetry) {
@@ -127,6 +160,7 @@
     const raw = propertyMap(result);
     const telemetry = parseRoverState(raw.rover_state);
     const cloudReceivedAt = Number(receivedAtMs) / 1000;
+    const slave = normalizeSlave(raw.slave_state, cloudReceivedAt);
     const telemetryUpdatedAt = Number(telemetry.updated_at || 0);
     const stateAgeSec = telemetryUpdatedAt > 0
       ? Math.max(0, cloudReceivedAt - telemetryUpdatedAt)
@@ -190,11 +224,16 @@
       state_age_sec: stateAgeSec,
       telemetry,
       raw,
+      properties_present: {
+        rover_state: Object.prototype.hasOwnProperty.call(raw, "rover_state"),
+        slave_state: Object.prototype.hasOwnProperty.call(raw, "slave_state"),
+      },
       optical: {
         blocked: aircraft.blocked,
         state: aircraft.blocked ? "blocked" : "locked",
       },
       aircraft,
+      slave,
     };
   }
 
@@ -285,20 +324,21 @@
     });
   }
 
-  function prepareAircraftUploadRoute(points, state) {
+  function prepareAircraftUploadRoute(points, state, target = "aircraft") {
     const manualPoints = Array.isArray(points)
       ? points.filter((point) => point?.autoReturn !== true)
       : [];
     if (manualPoints.length === 0) {
       throw new ValueError("aircraft mission requires at least one point");
     }
-    if (!state?.state_fresh) {
+    const selected = target === SLAVE_TARGET ? state?.slave : state?.aircraft;
+    if (target === SLAVE_TARGET ? !selected?.state_fresh : !state?.state_fresh) {
       throw new ValueError("aircraft state is stale");
     }
-    if (!aircraftCommandsAllowed(state)) {
+    if (!aircraftCommandsAllowed(state, target)) {
       throw new ValueError("OPTICAL LINK BLOCKED");
     }
-    const aircraft = state.aircraft || {};
+    const aircraft = selected || {};
     const lat = Number(aircraft.lat);
     const lng = Number(aircraft.lng);
     if (!validCoordinate(lat, lng)) {
@@ -348,7 +388,9 @@
   }
 
   function buildMissionCommand(vehicle, rawPoints, options = {}) {
-    const target = vehicle === "aircraft" ? "aircraft" : vehicle === "rover" ? "rover" : "";
+    const target = vehicle === "aircraft" || vehicle === SLAVE_TARGET
+      ? vehicle
+      : vehicle === "rover" ? "rover" : "";
     if (!target) throw new ValueError("mission target must be rover or aircraft");
     if (!Array.isArray(rawPoints) || rawPoints.length === 0) {
       throw new ValueError("mission requires at least one point");
@@ -388,7 +430,7 @@
     const commandId = String(options.commandId || makeId());
     const missionId = String(options.missionId || `${target}-${Date.now()}`);
     return {
-      command: target === "aircraft" ? "aircraft_mission" : "mission",
+      command: target === "rover" ? "mission" : "aircraft_mission",
       target,
       command_id: commandId,
       source_timestamp: Number(options.timestamp ?? Date.now()),
@@ -411,13 +453,16 @@
   function filterCommandProperties(command) {
     const result = {};
     if (!command || typeof command !== "object") return result;
-    const hasEnvelope = command.payload && typeof command.payload === "object";
+    const hasEnvelope = (command.payload && typeof command.payload === "object")
+      || command.target === SLAVE_TARGET;
     if (hasEnvelope) {
       const envelope = {
         command: command.command || command.action || "",
         ...(command.command_id ? {command_id: command.command_id} : {}),
+        ...(command.target === SLAVE_TARGET ? {target: command.target} : {}),
         payload: command.payload,
       };
+      if (envelope.payload === undefined) delete envelope.payload;
       result.command = JSON.stringify(envelope);
       return result;
     }
@@ -428,7 +473,16 @@
     return result;
   }
 
-  function aircraftCommandsAllowed(state) {
+  function aircraftCommandsAllowed(state, target = "aircraft") {
+    if (target === SLAVE_TARGET) {
+      return Boolean(
+        state?.online
+        && state?.slave?.state_fresh
+        && state?.slave?.online
+        && state?.slave?.link_active
+        && !state?.slave?.blocked,
+      );
+    }
     const linkActive = Boolean(
       state?.aircraft?.link_active
       || state?.telemetry?.aircraft_link,
@@ -443,14 +497,15 @@
 
   function transactionTimeline(telemetry, vehicle) {
     const aircraft = vehicle === "aircraft";
+    const slave = vehicle === SLAVE_TARGET;
     const stage = String(
-      aircraft ? telemetry?.aircraft_tx_stage : telemetry?.rover_tx_stage,
+      slave ? telemetry?.mission_stage : aircraft ? telemetry?.aircraft_tx_stage : telemetry?.rover_tx_stage,
     ).toLowerCase();
     const status = String(
-      aircraft ? telemetry?.aircraft_mission_status : telemetry?.mission_status,
+      slave ? (telemetry?.mission_status || telemetry?.mission_stage) : aircraft ? telemetry?.aircraft_mission_status : telemetry?.mission_status,
     ).toLowerCase();
     const error = String(
-      (aircraft ? telemetry?.aircraft_fault_text : telemetry?.fault_text) || "",
+      (slave ? telemetry?.fault : aircraft ? telemetry?.aircraft_fault_text : telemetry?.fault_text) || "",
     );
     const keys = ["upload", "verified", "ready", "auto", "reached"];
     const rank = {
@@ -498,8 +553,15 @@
 
   function isAircraftCommand(command) {
     if (!command || typeof command !== "object") return false;
-    return command.target === "aircraft"
+    return command.target === "aircraft" || command.target === SLAVE_TARGET
       || String(command.command || command.action || "").startsWith(AIRCRAFT_PREFIX);
+  }
+
+  function createGroundStationStores() {
+    return {
+      routes: {rover: [], aircraft: [], aircraft_2: []},
+      messages: {aircraft: [], aircraft_2: []},
+    };
   }
 
   return {
@@ -508,6 +570,7 @@
     aircraftCommandsAllowed,
     aircraftHeartbeatSummary,
     buildMissionCommand,
+    createGroundStationStores,
     distanceMeters,
     filterCommandProperties,
     formatObservedPosition,

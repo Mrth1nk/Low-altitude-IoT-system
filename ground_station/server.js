@@ -124,6 +124,19 @@ function normalizeStatus(result, receivedAtMs) {
 }
 
 function preserveAircraftDetails(previous, next) {
+  const roverPresent = next?.properties_present?.rover_state !== false;
+  const slavePresent = next?.properties_present?.slave_state === true;
+  if (previous && !roverPresent) {
+    next = {
+      ...next,
+      telemetry: {...(previous.telemetry || {})},
+      aircraft: {...(previous.aircraft || {})},
+      optical: {...(previous.optical || {})},
+    };
+  }
+  if (previous && !slavePresent) {
+    next = {...next, slave: {...(previous.slave || {})}};
+  }
   const aircraftLinkActive = next?.telemetry?.aircraft_link === true;
   const nextHasDetails = Boolean(
     next?.aircraft?.link_active
@@ -155,6 +168,8 @@ function preserveAircraftDetails(previous, next) {
 
   merged.telemetry = retainPosition(previous?.telemetry, next?.telemetry || {});
   merged.aircraft = retainPosition(previous?.aircraft, merged.aircraft || {});
+  merged.slave = retainPosition(previous?.slave, next?.slave || {});
+  merged.raw = {...(previous?.raw || {}), ...(next?.raw || {})};
   return merged;
 }
 
@@ -172,12 +187,28 @@ function createStateReader({
   let inFlight = null;
 
   const serve = (state) => {
-    const served = {...state, telemetry: {...(state?.telemetry || {})}};
+    const served = {
+      ...state,
+      telemetry: {...(state?.telemetry || {})},
+      aircraft: {...(state?.aircraft || {})},
+      slave: {...(state?.slave || {})},
+    };
     const updatedAt = Number(served.telemetry.updated_at || 0);
     served.state_age_sec = updatedAt > 0
       ? Math.max(0, now() / 1000 - updatedAt)
       : null;
     served.state_fresh = served.state_age_sec !== null && served.state_age_sec <= 8;
+    const slaveUpdatedAt = Number(served.slave.updated_at || 0);
+    served.slave.state_age_sec = slaveUpdatedAt > 0
+      ? Math.max(0, now() / 1000 - slaveUpdatedAt)
+      : null;
+    served.slave.state_fresh = served.slave.state_age_sec !== null
+      && served.slave.state_age_sec <= 3;
+    if (!served.slave.state_fresh) {
+      served.slave.online = false;
+      served.slave.link_active = false;
+      served.slave.status = "OFFLINE";
+    }
     return served;
   };
 
@@ -254,10 +285,13 @@ function buildCommandsBody(properties) {
   };
 }
 
-async function sendCommand(command) {
-  if (command?.command === "aircraft_mission" && Array.isArray(command?.payload?.items)) {
+function buildAircraftMissionFragments(command) {
+  if (command?.command !== "aircraft_mission" || !Array.isArray(command?.payload?.items)) {
+    throw new Error("aircraft mission items are required");
+  }
     const commandId = command.command_id || crypto.randomUUID();
     const missionId = String(command.payload.mission_id || `aircraft-${Date.now()}`);
+    const target = command.target === "aircraft_2" ? "aircraft_2" : "aircraft";
     const items = command.payload.items.map((item, index) => ({
       mission_id: missionId,
       index,
@@ -286,16 +320,28 @@ async function sendCommand(command) {
     const checksum = crypto.createHash("sha256")
       .update(stable(items))
       .digest("hex");
-    const fragments = [
-      {command: "aircraft_mission_begin", command_id: commandId,
-        payload: {mission_id: missionId, item_count: items.length, vehicle: "aircraft", checksum}},
-      ...items.map((item) => ({command: "aircraft_mission_item", command_id: commandId, payload: item})),
-      {command: "aircraft_mission_commit", command_id: commandId,
+    return [
+      {command: "aircraft_mission_begin", command_id: commandId, target,
+        payload: {mission_id: missionId, item_count: items.length, vehicle: target, checksum}},
+      ...items.map((item) => ({command: "aircraft_mission_item", command_id: commandId, target, payload: item})),
+      {command: "aircraft_mission_commit", command_id: commandId, target,
         payload: {mission_id: missionId, item_count: items.length, checksum}},
     ];
+}
+
+async function sendCommand(command, options = {}) {
+  if (!options.skipGate && isAircraftCommand(command)) {
+    const gateState = FAKE_TUYA ? lastState : await fetchState();
+    const target = command.target === "aircraft_2" ? "aircraft_2" : "aircraft";
+    if (!gateState || !aircraftCommandsAllowed(gateState, target)) {
+      throw new Error(target === "aircraft_2" ? "SLAVE OFFLINE" : "OPTICAL LINK BLOCKED");
+    }
+  }
+  if (command?.command === "aircraft_mission" && Array.isArray(command?.payload?.items)) {
+    const fragments = buildAircraftMissionFragments(command);
     const results = [];
     for (const fragment of fragments) {
-      results.push(await sendCommand(fragment));
+      results.push(await sendCommand(fragment, {skipGate: true}));
       await new Promise((resolve) => setTimeout(resolve, 450));
     }
     return {success: true, fragmented: true, count: fragments.length, results};
@@ -303,12 +349,6 @@ async function sendCommand(command) {
   const properties = filterCommandProperties(command);
   if (!Object.keys(properties).length) {
     throw new Error("没有可下发的涂鸦属性");
-  }
-  if (isAircraftCommand(properties)) {
-    const gateState = FAKE_TUYA ? lastState : await fetchState();
-    if (!gateState || !aircraftCommandsAllowed(gateState)) {
-      throw new Error("OPTICAL LINK BLOCKED");
-    }
   }
   if (FAKE_TUYA) {
     fakeRevision += 1;
@@ -328,6 +368,7 @@ function fakeState() {
     {
       code: "rover_state",
       value: JSON.stringify({
+        updated_at: now,
         lat: 32.11956 + offset,
         lng: 118.958406 + offset,
         ground_speed: fakeRevision ? 0.7 : 0,
@@ -358,6 +399,26 @@ function fakeState() {
             {time: now, sequence: fakeRevision * 2 + 1, type: "STATUS", text: "optical target locked"},
           ],
         },
+      }),
+    },
+    {
+      code: "slave_state",
+      value: JSON.stringify({
+        updated_at: now,
+        online: true,
+        fc_connected: true,
+        blocked: false,
+        mode: "LOITER",
+        armed: false,
+        battery: 100,
+        lat: 32.11966,
+        lon: 118.95852,
+        position_observed: true,
+        altitude: 16.4,
+        speed: 0.2,
+        heading: 115,
+        mission_stage: "READY",
+        event: {timestamp: now, sequence: fakeRevision, type: "HEARTBEAT", text: "LOITER armed=NO"},
       }),
     },
     {code: "command", value: "noop"},
@@ -482,6 +543,7 @@ function startServer() {
 if (require.main === module) startServer();
 
 module.exports = {
+  buildAircraftMissionFragments,
   buildCommandsBody,
   buildIssueBody,
   createStateReader,

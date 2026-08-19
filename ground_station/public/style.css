@@ -79,8 +79,8 @@ h3 { font-size: 14px; }
 .eyebrow { display: block; color: var(--muted); font-size: 10px; font-weight: 800; }
 .mode-switch {
   display: grid;
-  grid-template-columns: 1fr 1fr;
-  width: 150px;
+  grid-template-columns: repeat(3, 1fr);
+  width: 210px;
   padding: 2px;
   border: 1px solid var(--line);
   border-radius: 6px;
@@ -121,6 +121,7 @@ button:disabled { border-color: #aab6c5; background: #aab6c5; cursor: not-allowe
 }
 .map-legend span::before { content: ""; display: inline-block; width: 14px; height: 3px; margin: 0 4px 2px 0; background: var(--teal); }
 .map-legend .aircraft-line::before { background: var(--blue); }
+.map-legend .slave-line::before { background: var(--amber); }
 .mission-editor {
   display: grid;
   grid-template-columns: 1.05fr 1.05fr .8fr .8fr 78px 54px;
@@ -220,6 +221,7 @@ input {
 .waypoint-icon.aircraft span {
   background: #2463df;
 }
+.waypoint-icon.aircraft_2 span { background: var(--amber); }
 .queue-row.current { background: #eaf2ff; color: #174ea6; }
 .queue-row span { overflow-wrap: anywhere; }
 .status-block { display: grid; grid-template-columns: 1fr; gap: 6px; margin-top: 7px; }
@@ -263,6 +265,20 @@ input {
 .aircraft-metrics { grid-template-columns: repeat(4, minmax(0, 1fr)); }
 .aircraft-panel .timeline { margin-top: 7px; }
 .aircraft-commands { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+.aircraft-tabs {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 4px;
+  margin-bottom: 7px;
+  padding: 2px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: #f7f9fc;
+}
+.aircraft-tabs button { height: 28px; border-color: transparent; background: transparent; color: var(--muted); }
+.aircraft-tabs button::before { content: ""; display: inline-block; width: 7px; height: 7px; margin-right: 5px; border-radius: 50%; background: #94a3b8; }
+.aircraft-tabs button.online::before { background: #16a34a; }
+.aircraft-tabs button.active { background: var(--blue); color: #fff; }
 .message-heading { margin-top: 9px; }
 .message-heading span { color: var(--muted); font-size: 10px; }
 .messages {
