@@ -63,7 +63,10 @@ if ((!DRY_RUN)); then
     echo "SLAVE_FC_DEVICE=/dev/serial/by-id/... is required" >&2; exit 1;
   }
   set -a; source "$env_file"; set +a
-  bash "$SOURCE_DIR/ops/health_slave.sh" --preflight
+  runuser -u sunrise -- env \
+    SLAVE_FC_DEVICE="$SLAVE_FC_DEVICE" \
+    SLAVE_HEARTBEAT_TIMEOUT="${SLAVE_HEARTBEAT_TIMEOUT:-5}" \
+    bash "$SOURCE_DIR/ops/health_slave.sh" --preflight
   systemctl is-enabled --quiet low-altitude-slave.service && WAS_ENABLED=enabled || WAS_ENABLED=disabled
   systemctl is-active --quiet low-altitude-slave.service && WAS_ACTIVE=active || WAS_ACTIVE=inactive
 fi
