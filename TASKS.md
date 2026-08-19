@@ -10,18 +10,22 @@
   gate and one exclusive local MAVLink owner.
 - Added transactional slave install, health and rollback tooling without a
   board reboot.
-
-### In Progress
-
-- Integrating `aircraft_2` routing, compact `slave_state`, ground-station tabs,
-  device deployment and real two-client link verification.
+- Added Tuya DP108 `slave_state` as a 1024-character read/write string and
+  verified fresh slave state through L610/Tuya Cloud.
+- Deployed the coordinator and slave services and verified both RDKs on
+  `woshinailong` with real flight-controller heartbeat, mode and command ACK.
+- Verified a two-waypoint slave mission through the complete cloud path. The
+  slave flight controller accepted the upload and readback returned
+  `VERIFIED` for mission `slave-e2e3-1787143915` without arming or AUTO.
+- Normalized mission parameters after Tuya JSON number conversion so `0.0`
+  becoming `0` cannot invalidate the mission checksum.
 
 ### Remaining
 
-1. Add the Tuya `slave_state` string property with a 480-byte-compatible limit.
-2. Verify both RDKs on `woshinailong`, including ACK, heartbeat, stale recovery
-   and mission readback with propellers removed.
-3. Push and tag the verified dual-aircraft release.
+1. Outdoors, wait for valid slave GPS, Home and EKF state before selecting
+   `AUTO`; the indoor upload/readback test intentionally did not execute.
+2. Add the reserved slave optical gate after the physical optical receiver is
+   integrated.
 
 ## 2026-08-06 Precision Landing Final Descent
 

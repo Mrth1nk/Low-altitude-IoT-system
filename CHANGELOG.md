@@ -11,6 +11,21 @@
   gate that defaults to unblocked.
 - Added atomic slave installation, fixed `by-id` flight-controller preflight,
   serial ownership checks, health checks and rollback support.
+- Added the local ground-station `aircraft_2` panel, isolated command target,
+  compact cloud-state merge and fragmented mission upload.
+- Added Tuya DP108 `slave_state` as a 1024-character read/write string.
+- Verified two simultaneous clients on `woshinailong`: the slave sent one-hertz
+  status to the rover at `192.168.4.2:14610`, and the rover sent commands to
+  the slave at `192.168.4.3:14620` while L610 remained the cloud route.
+- Verified a real Tuya-to-rover-to-slave-to-flight-controller `DISARM` command
+  and received the slave `VERIFIED` response.
+- Fixed slave mission checksums after Tuya normalizes integral JSON floats
+  (`0.0`) to integers (`0`). Mission parameters are now canonicalized before
+  checksum validation.
+- Verified mission `slave-e2e3-1787143915` through four Tuya fragments, rover
+  reassembly, slave durable queue, MAVLink upload and flight-controller
+  readback. The controller returned `VERIFIED`; indoor GPS/Home/EKF warnings
+  remain the expected execution gate and no ARM/AUTO command was sent.
 
 ## 2026-08-06
 

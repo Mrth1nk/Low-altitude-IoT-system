@@ -104,7 +104,16 @@ class SlaveMissionFragmentIntegrationTests(unittest.TestCase):
                     "command_id": str(command_id),
                     "target": "aircraft_2",
                     "source_timestamp": now,
-                    "payload": item,
+                    # Tuya's JSON round trip collapses integral floats such as
+                    # 0.0 to 0.  The rover must normalize those values before
+                    # validating the checksum produced by the ground station.
+                    "payload": {
+                        **item,
+                        "param1": 0,
+                        "param2": 0,
+                        "param3": 0,
+                        "param4": 0,
+                    },
                 }
                 for item in items
             ],

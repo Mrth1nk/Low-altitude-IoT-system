@@ -13,6 +13,17 @@ forwarded across this link. `OFFLINE` means no fresh slave status for three
 seconds. `BLOCKED` is a separate reserved optical-gate state and is disabled
 for the first slave deployment.
 
+Tuya product DP108 must be configured as:
+
+```text
+Name: 从机完整状态
+Identifier: slave_state
+Type: property
+Data type: String
+Maximum length: 1024
+Transfer: read/write (rw)
+```
+
 ## Slave environment
 
 Create `/etc/low-altitude-iot/slave.env` as root with mode `0600`:
@@ -42,6 +53,18 @@ sudo bash ops/health_slave.sh
 The installer backs up the prior release, validates a Copter heartbeat and
 serial ownership, then restarts only the slave service. It never reboots the
 board.
+
+## Safe indoor mission verification
+
+Mission upload and flight-controller readback do not require arming or
+selecting `AUTO`. Put both RDKs on `woshinailong`, upload a short aircraft-2
+mission, and wait for the same mission ID to report `VERIFIED`. Indoor warnings
+about GPS fix, satellites, Home, EKF or stale navigation data are expected:
+they prevent execution but do not invalidate a successful upload/readback.
+
+Only test execution outdoors after GPS, Home and EKF are valid. Arm under
+supervision and select `AUTO` only after the ground station shows the intended
+mission ID as verified.
 
 ## Network profiles
 

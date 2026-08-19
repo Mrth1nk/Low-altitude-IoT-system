@@ -329,9 +329,14 @@ class SlaveTransport:
             "lon": float(lon),
             "alt": float(raw.get("alt", raw.get("altitude", raw.get("target_alt", 0)))),
         }
-        for key in ("command", "frame", "param1", "param2", "param3", "param4", "autocontinue"):
+        for key in ("command", "frame"):
             if key in raw:
-                item[key] = raw[key]
+                item[key] = int(raw[key])
+        for key in ("param1", "param2", "param3", "param4"):
+            if key in raw:
+                item[key] = float(raw[key])
+        if "autocontinue" in raw:
+            item["autocontinue"] = bool(raw["autocontinue"])
         return item
 
     def _receive(self, max_receive, now):
