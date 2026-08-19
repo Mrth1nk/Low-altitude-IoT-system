@@ -9,6 +9,9 @@ ROOT = Path(__file__).resolve().parents[2]
 INSTALL = ROOT / "ops" / "install_slave.sh"
 HEALTH = ROOT / "ops" / "health_slave.sh"
 UNIT = ROOT / "ops" / "systemd" / "low-altitude-slave.service"
+NETWORK_SERVICE = ROOT / "ops" / "systemd" / "low-altitude-slave-network-switch.service"
+NETWORK_PATH = ROOT / "ops" / "systemd" / "low-altitude-slave-network-switch.path"
+NETWORK_SWITCH = ROOT / "ops" / "switch_slave_network.sh"
 
 
 def run_script(path, *args):
@@ -64,6 +67,19 @@ class SlaveInstallTests(unittest.TestCase):
         self.assertIn("stat -c %u", source)
         self.assertIn("stat -c %a", source)
         self.assertIn("SLAVE_FC_DEVICE=/dev/serial/by-id/", source)
+
+    def test_installer_adds_root_owned_slave_network_switch(self):
+        service = NETWORK_SERVICE.read_text()
+        path = NETWORK_PATH.read_text()
+        switch = NETWORK_SWITCH.read_text()
+        installer = INSTALL.read_text()
+
+        self.assertIn("User=root", service)
+        self.assertIn("ExecStartPre=/bin/sleep 2", service)
+        self.assertIn("PathExists=/run/low-altitude-slave/network-mode", path)
+        self.assertIn("network_phone", switch)
+        self.assertIn("nmcli connection up", switch)
+        self.assertIn("low-altitude-slave-network-switch.path", installer)
 
 
 if __name__ == "__main__":

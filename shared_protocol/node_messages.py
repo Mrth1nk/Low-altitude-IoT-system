@@ -20,6 +20,7 @@ MESSAGE_TYPES = frozenset((
 ))
 COMMAND_ACTIONS = frozenset((
     "guided", "loiter", "auto", "land", "arm", "disarm",
+    "network_phone",
 ))
 TRANSACTION_STAGES = frozenset((
     "RECEIVED", "QUEUED", "EXECUTING", "VERIFIED", "FAILED",

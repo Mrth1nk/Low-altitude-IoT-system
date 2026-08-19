@@ -1,0 +1,9 @@
+[Unit]
+Description=Watch for aircraft-2 maintenance network requests
+
+[Path]
+PathExists=/run/low-altitude-slave/network-mode
+Unit=low-altitude-slave-network-switch.service
+
+[Install]
+WantedBy=multi-user.target

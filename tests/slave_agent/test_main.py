@@ -2,6 +2,7 @@ import tempfile
 import threading
 import time
 import unittest
+import json
 from pathlib import Path
 
 
@@ -87,10 +88,12 @@ class SlaveRuntimeTests(unittest.TestCase):
             self.assertEqual(runtime.link.kwargs["local_port"], 14620)
             self.assertEqual(runtime.link.kwargs["peer_port"], 14610)
             from slave_agent.command_queue import VerifiedOperations
+            from slave_agent.main import NetworkRequestOperations
             from slave_agent.optical_gate import NoOpOpticalGate
 
             command_queue = runtime.link.args[0]
-            self.assertIsInstance(runtime.worker.operations, VerifiedOperations)
+            self.assertIsInstance(runtime.worker.operations, NetworkRequestOperations)
+            self.assertIsInstance(runtime.worker.operations.delegate, VerifiedOperations)
             self.assertIsInstance(command_queue.optical_gate, NoOpOpticalGate)
             self.assertIs(command_queue.optical_gate, runtime.state.optical_gate)
             self.assertIs(command_queue.stage_callback.__self__, runtime.state)
@@ -105,6 +108,32 @@ class SlaveRuntimeTests(unittest.TestCase):
             self.assertTrue(session.closed)
             self.assertTrue(session.connection.closed)
             self.assertTrue(runtime.link.closed)
+
+    def test_network_phone_request_is_persisted_without_touching_flight_mode(self):
+        from slave_agent.main import NetworkRequestOperations
+
+        class Delegate:
+            def __init__(self):
+                self.modes = []
+
+            def set_mode(self, mode):
+                self.modes.append(mode)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            delegate = Delegate()
+            path = Path(tmp) / "network-mode"
+            operations = NetworkRequestOperations(
+                delegate, path, clock=lambda: 123.5
+            )
+
+            operations.set_mode("NETWORK_PHONE")
+
+            self.assertEqual(delegate.modes, [])
+            self.assertEqual(json.loads(path.read_text()), {
+                "mode": "phone",
+                "requested_at": 123.5,
+                "source": "aircraft_2",
+            })
 
     def test_close_waits_for_active_worker_before_closing_serial(self):
         from slave_agent.main import SlaveRuntime

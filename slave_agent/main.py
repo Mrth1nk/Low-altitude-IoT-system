@@ -52,6 +52,31 @@ class SlaveConfig:
         )
 
 
+class NetworkRequestOperations:
+    """Keeps maintenance network changes out of the MAVLink command path."""
+
+    def __init__(self, delegate, request_path, *, clock=time.time):
+        self.delegate = delegate
+        self.request_store = AtomicJsonStore(request_path, max_bytes=4096)
+        self.clock = clock
+
+    def set_mode(self, mode):
+        if str(mode).upper() != "NETWORK_PHONE":
+            return self.delegate.set_mode(mode)
+        self.request_store.save({
+            "mode": "phone",
+            "requested_at": float(self.clock()),
+            "source": "aircraft_2",
+        })
+        return None
+
+    def arm(self, value):
+        return self.delegate.arm(value)
+
+    def execute(self, record, start_auto=False):
+        return self.delegate.execute(record, start_auto=start_auto)
+
+
 class SlaveRuntime:
     def __init__(self, *, config, session, worker, link, inbox, state, health_store, clock=time.time):
         self.config = config
@@ -130,7 +155,12 @@ def build_runtime(
         max_queue=16,
     ))
     mission = AircraftMissionWorker(session, telemetry)
-    operations = VerifiedOperations(mission, state)
+    verified_operations = VerifiedOperations(mission, state)
+    operations = NetworkRequestOperations(
+        verified_operations,
+        config.runtime_dir / "network-mode",
+        clock=clock,
+    )
     worker = AircraftCommandWorker(
         inbox,
         operations,

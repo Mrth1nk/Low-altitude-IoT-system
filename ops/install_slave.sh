@@ -8,6 +8,8 @@ BACKUP_DIR=
 COMMITTED=0
 WAS_ENABLED=unknown
 WAS_ACTIVE=unknown
+NETWORK_WAS_ENABLED=unknown
+NETWORK_WAS_ACTIVE=unknown
 
 while (($#)); do
   case "$1" in
@@ -40,14 +42,24 @@ rollback() {
     rm -rf "$(dest /opt/low-altitude-iot/current)"
     [[ -e "$(dest /opt/low-altitude-iot/previous)" ]] &&
       mv "$(dest /opt/low-altitude-iot/previous)" "$(dest /opt/low-altitude-iot/current)"
-    for rel in etc/systemd/system/low-altitude-slave.service usr/local/lib/low-altitude-iot/health_slave.sh; do
-      [[ -e "$BACKUP_DIR/$rel" ]] || continue
-      install -d -m 0755 "$(dirname "$(dest /$rel)")"
-      cp -a "$BACKUP_DIR/$rel" "$(dest /$rel)"
+    for rel in \
+      etc/systemd/system/low-altitude-slave.service \
+      etc/systemd/system/low-altitude-slave-network-switch.service \
+      etc/systemd/system/low-altitude-slave-network-switch.path \
+      usr/local/lib/low-altitude-iot/health_slave.sh \
+      usr/local/lib/low-altitude-iot/switch_slave_network.sh; do
+      if [[ -e "$BACKUP_DIR/$rel" ]]; then
+        install -d -m 0755 "$(dirname "$(dest /$rel)")"
+        cp -a "$BACKUP_DIR/$rel" "$(dest /$rel)"
+      else
+        rm -f "$(dest /$rel)"
+      fi
     done
     systemctl daemon-reload || true
     [[ "$WAS_ENABLED" == enabled ]] && systemctl enable low-altitude-slave.service || systemctl disable low-altitude-slave.service || true
     [[ "$WAS_ACTIVE" == active ]] && systemctl restart low-altitude-slave.service || systemctl stop low-altitude-slave.service || true
+    [[ "$NETWORK_WAS_ENABLED" == enabled ]] && systemctl enable low-altitude-slave-network-switch.path || systemctl disable low-altitude-slave-network-switch.path || true
+    [[ "$NETWORK_WAS_ACTIVE" == active ]] && systemctl start low-altitude-slave-network-switch.path || systemctl stop low-altitude-slave-network-switch.path || true
   fi
   return "$rc"
 }
@@ -70,6 +82,8 @@ if ((!DRY_RUN)); then
     bash "$SOURCE_DIR/ops/health_slave.sh" --preflight
   systemctl is-enabled --quiet low-altitude-slave.service && WAS_ENABLED=enabled || WAS_ENABLED=disabled
   systemctl is-active --quiet low-altitude-slave.service && WAS_ACTIVE=active || WAS_ACTIVE=inactive
+  systemctl is-enabled --quiet low-altitude-slave-network-switch.path && NETWORK_WAS_ENABLED=enabled || NETWORK_WAS_ENABLED=disabled
+  systemctl is-active --quiet low-altitude-slave-network-switch.path && NETWORK_WAS_ACTIVE=active || NETWORK_WAS_ACTIVE=inactive
 fi
 
 BACKUP_DIR="$(dest /var/backups/low-altitude-iot)/slave-$(date +%Y%m%d%H%M%S)"
@@ -77,7 +91,12 @@ say "BACKUP: current release and slave service -> $BACKUP_DIR"
 say "ROLLBACK: armed until post-install health succeeds"
 if ((!DRY_RUN)); then
   install -d -m 0700 "$BACKUP_DIR"
-  for path in "$(dest /etc/systemd/system/low-altitude-slave.service)" "$(dest /usr/local/lib/low-altitude-iot/health_slave.sh)"; do
+  for path in \
+    "$(dest /etc/systemd/system/low-altitude-slave.service)" \
+    "$(dest /etc/systemd/system/low-altitude-slave-network-switch.service)" \
+    "$(dest /etc/systemd/system/low-altitude-slave-network-switch.path)" \
+    "$(dest /usr/local/lib/low-altitude-iot/health_slave.sh)" \
+    "$(dest /usr/local/lib/low-altitude-iot/switch_slave_network.sh)"; do
     [[ -e "$path" ]] && cp -a --parents "$path" "$BACKUP_DIR"
   done
 fi
@@ -97,9 +116,13 @@ fi
 
 run install -d -m 0755 "$(dest /usr/local/lib/low-altitude-iot)" "$(dest /etc/systemd/system)"
 run install -m 0755 "$SOURCE_DIR/ops/health_slave.sh" "$(dest /usr/local/lib/low-altitude-iot/health_slave.sh)"
+run install -m 0755 "$SOURCE_DIR/ops/switch_slave_network.sh" "$(dest /usr/local/lib/low-altitude-iot/switch_slave_network.sh)"
 run install -m 0644 "$SOURCE_DIR/ops/systemd/low-altitude-slave.service" "$(dest /etc/systemd/system/low-altitude-slave.service)"
+run install -m 0644 "$SOURCE_DIR/ops/systemd/low-altitude-slave-network-switch.service" "$(dest /etc/systemd/system/low-altitude-slave-network-switch.service)"
+run install -m 0644 "$SOURCE_DIR/ops/systemd/low-altitude-slave-network-switch.path" "$(dest /etc/systemd/system/low-altitude-slave-network-switch.path)"
 run systemctl daemon-reload
 run systemctl enable low-altitude-slave.service
+run systemctl enable --now low-altitude-slave-network-switch.path
 run systemctl restart low-altitude-slave.service
 
 say "HEALTH: service, UDP listener and fixed serial identity"

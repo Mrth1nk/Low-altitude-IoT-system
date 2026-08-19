@@ -148,6 +148,23 @@ class NodeMessageTests(unittest.TestCase):
             with self.subTest(candidate=candidate), self.assertRaises(NodeMessageError):
                 encode_node_message(candidate)
 
+    def test_aircraft_2_network_phone_command_is_typed(self):
+        message = build_command_message(
+            action="network_phone",
+            parameters={},
+            source="rover",
+            target="aircraft_2",
+            command_id=self.command_id,
+            sequence=8,
+            timestamp=20.0,
+        )
+
+        decoded = decode_node_message(
+            encode_node_message(message), expected_target="aircraft_2"
+        )
+
+        self.assertEqual(decoded["payload"]["action"], "network_phone")
+
     def test_mission_constructors_require_count_digest_and_ordered_items(self):
         items = [
             {"index": 0, "lat": 32.1, "lon": 118.9, "alt": 20.0},
