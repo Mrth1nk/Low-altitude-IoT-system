@@ -75,6 +75,79 @@ class CommandRouterTests(unittest.TestCase):
         self.assertEqual(self.rover.commands, [])
         self.assertEqual(self.aircraft.commands, [command])
 
+    def test_legacy_aircraft_and_aircraft_1_share_main_link_without_changing_legacy_target(self):
+        explicit = CloudCommand.from_cloud(
+            {"target": "aircraft_1", "action": "loiter", "source_timestamp": self.now}
+        )
+        self.router.route(explicit)
+
+        self.assertEqual(explicit.target, "aircraft_1")
+        self.assertEqual(len(self.aircraft.commands), 1)
+        self.assertEqual(self.aircraft.commands[0].target, "aircraft")
+        self.assertEqual(self.aircraft.commands[0].command_id, explicit.command_id)
+
+    def test_aircraft_2_prefix_and_explicit_target_route_only_to_slave(self):
+        slave = RecordingExecutor()
+        router = CommandRouter(
+            self.rover,
+            self.aircraft,
+            lambda: self.optical_state,
+            system_executor=self.system,
+            aircraft_2_link=slave,
+            clock=lambda: self.now,
+        )
+        prefixed = CloudCommand.from_cloud(
+            {"command": "aircraft_2_guided", "source_timestamp": self.now}
+        )
+        explicit = CloudCommand.from_cloud(
+            {"target": "aircraft_2", "action": "land", "source_timestamp": self.now}
+        )
+        compatible = CloudCommand.from_cloud(
+            {"target": "aircraft_2", "command": "aircraft_auto", "source_timestamp": self.now}
+        )
+
+        router.route(prefixed)
+        router.route(explicit)
+        router.route(compatible)
+
+        self.assertEqual(prefixed.target, "aircraft_2")
+        self.assertEqual(prefixed.action, "guided")
+        self.assertEqual(compatible.action, "auto")
+        self.assertEqual(slave.commands, [prefixed, explicit, compatible])
+        self.assertEqual(self.aircraft.commands, [])
+        self.assertEqual(self.rover.commands, [])
+
+    def test_slave_route_is_not_guarded_by_main_aircraft_optical_state(self):
+        self.optical_state = "blocked"
+        slave = RecordingExecutor()
+        router = CommandRouter(
+            self.rover,
+            self.aircraft,
+            lambda: self.optical_state,
+            aircraft_2_link=slave,
+            clock=lambda: self.now,
+        )
+        command = CloudCommand.from_cloud(
+            {"target": "aircraft_2", "action": "disarm", "source_timestamp": self.now}
+        )
+
+        router.route(command)
+
+        self.assertEqual(slave.commands, [command])
+
+    def test_disabled_slave_route_rejects_without_affecting_main_link(self):
+        command = CloudCommand.from_cloud(
+            {"target": "aircraft_2", "action": "loiter", "source_timestamp": self.now}
+        )
+
+        with self.assertRaisesRegex(CommandRejected, "disabled"):
+            self.router.route(command)
+
+        self.router.route(CloudCommand.from_cloud(
+            {"command": "aircraft_loiter", "source_timestamp": self.now}
+        ))
+        self.assertEqual(len(self.aircraft.commands), 1)
+
     def test_routes_network_mode_only_to_system_executor(self):
         command = CloudCommand.from_cloud(
             {

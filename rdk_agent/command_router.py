@@ -67,13 +67,24 @@ class CloudCommand:
         if raw_action in ("network_phone", "network_aircraft"):
             target, action = "system", "network_mode"
             payload["mode"] = raw_action[len("network_") :]
+        elif raw_action.startswith("aircraft_2_"):
+            target, action = "aircraft_2", raw_action[len("aircraft_2_") :]
+        elif raw_action.startswith("aircraft_1_"):
+            target, action = "aircraft_1", raw_action[len("aircraft_1_") :]
         elif raw_action.startswith("aircraft_"):
-            target, action = "aircraft", raw_action[len("aircraft_") :]
+            target = (
+                explicit_target
+                if explicit_target in ("aircraft", "aircraft_1", "aircraft_2")
+                else "aircraft"
+            )
+            action = raw_action[len("aircraft_") :]
         else:
             target = explicit_target or "rover"
             action = raw_action
-        if target not in ("rover", "aircraft", "system"):
-            raise ValueError("target must be rover, aircraft, or system")
+        if target not in ("rover", "aircraft", "aircraft_1", "aircraft_2", "system"):
+            raise ValueError(
+                "target must be rover, aircraft, aircraft_1, aircraft_2, or system"
+            )
         if not action:
             raise ValueError("action must not be empty")
 
@@ -105,6 +116,7 @@ class CommandRouter:
         aircraft_link,
         optical_state,
         system_executor=None,
+        aircraft_2_link=None,
         clock=None,
         max_age_seconds=10.0,
     ):
@@ -113,6 +125,7 @@ class CommandRouter:
         self.rover_executor = rover_executor
         self.aircraft_link = aircraft_link
         self.system_executor = system_executor
+        self.aircraft_2_link = aircraft_2_link
         self.optical_state = optical_state
         self.clock = clock or time.time
         self.max_age_seconds = float(max_age_seconds)
@@ -125,10 +138,23 @@ class CommandRouter:
             raise CommandRejected("stale command")
         if age < -self.max_age_seconds:
             raise CommandRejected("command timestamp is too far in the future")
-        if command.target == "aircraft":
+        if command.target in ("aircraft", "aircraft_1"):
             if str(self.optical_state()).strip().lower() != "locked":
                 raise CommandRejected("aircraft command rejected: optical link blocked")
-            return self.aircraft_link.execute(command)
+            legacy_command = command
+            if command.target != "aircraft":
+                legacy_command = CloudCommand(
+                    command.command_id,
+                    command.source_timestamp,
+                    "aircraft",
+                    command.action,
+                    dict(command.payload),
+                )
+            return self.aircraft_link.execute(legacy_command)
+        if command.target == "aircraft_2":
+            if self.aircraft_2_link is None:
+                raise CommandRejected("aircraft_2 commands are disabled")
+            return self.aircraft_2_link.execute(command)
         if command.target == "system":
             if self.system_executor is None:
                 raise CommandRejected("system commands are disabled")

@@ -23,6 +23,7 @@ from rover_state import (
     record_command_receipt,
 )
 from rover_mission import MissionError
+from slave_transport import SlaveTransport
 from tuya_auth import build_tuya_credentials, make_topic
 from aircraft_agent.state_store import AtomicJsonStore
 
@@ -57,7 +58,64 @@ def load_config(path: Path = CONFIG_PATH) -> dict:
         "aircraft_auth_state_path",
         str(Path.home() / "uav_tuya_agent" / "aircraft_auth_state.json"),
     )
+    data.setdefault(
+        "slave_node_enabled",
+        os.environ.get("SLAVE_NODE_ENABLED", "0").strip().lower()
+        in ("1", "true", "yes", "on"),
+    )
+    data.setdefault("slave_local_host", os.environ.get("SLAVE_LOCAL_HOST", "0.0.0.0"))
+    data.setdefault("slave_local_port", int(os.environ.get("SLAVE_LOCAL_PORT", "14610")))
+    data.setdefault("slave_peer_host", os.environ.get("SLAVE_PEER_HOST", "192.168.4.3"))
+    data.setdefault("slave_peer_port", int(os.environ.get("SLAVE_PEER_PORT", "14620")))
+    data.setdefault(
+        "slave_status_timeout_sec",
+        float(os.environ.get("SLAVE_STATUS_TIMEOUT_SEC", "3.0")),
+    )
+    data.setdefault(
+        "slave_retry_interval_sec",
+        float(os.environ.get("SLAVE_RETRY_INTERVAL_SEC", "0.5")),
+    )
+    data.setdefault(
+        "slave_max_attempts",
+        int(os.environ.get("SLAVE_MAX_ATTEMPTS", "6")),
+    )
     return data
+
+
+def slave_node_enabled(config: dict) -> bool:
+    value = config.get("slave_node_enabled", False)
+    if isinstance(value, str):
+        return value.strip().lower() in ("1", "true", "yes", "on")
+    return bool(value)
+
+
+def create_slave_transport(config: dict):
+    if not slave_node_enabled(config):
+        return None
+    return SlaveTransport(
+        local_host=str(config.get("slave_local_host", "0.0.0.0")),
+        local_port=int(config.get("slave_local_port", 14610)),
+        peer=(
+            str(config.get("slave_peer_host", "192.168.4.3")),
+            int(config.get("slave_peer_port", 14620)),
+        ),
+        status_timeout=float(config.get("slave_status_timeout_sec", 3.0)),
+        retry_interval=float(config.get("slave_retry_interval_sec", 0.5)),
+        max_attempts=int(config.get("slave_max_attempts", 6)),
+    )
+
+
+def build_property_report(telemetry, aircraft_summary, slave_transport=None):
+    slave_state = None
+    if slave_transport is not None:
+        try:
+            slave_state = slave_transport.snapshot()
+        except Exception as exc:
+            print(f"slave snapshot isolated error: {exc}", flush=True)
+    return telemetry.tuya_compact_payload(
+        aircraft_summary,
+        slave_state=slave_state,
+    )
 
 
 def mqtt_client(config: dict):
@@ -324,6 +382,7 @@ def run_agent(config: dict) -> int:
             or os.environ.get("AIRCRAFT_LINK_PLAINTEXT", "0") == "1"
         ),
     )
+    slave_transport = create_slave_transport(config)
 
     def aircraft_optical_state():
         if aircraft_transport.optical_state() == "locked":
@@ -370,6 +429,7 @@ def run_agent(config: dict) -> int:
         aircraft_transport,
         optical_state=aircraft_optical_state,
         system_executor=NetworkModeExecutor(config["network_mode_request_path"]),
+        aircraft_2_link=slave_transport,
         max_age_seconds=float(config.get("command_max_age_sec", 10.0)),
     )
 
@@ -419,11 +479,10 @@ def run_agent(config: dict) -> int:
                 except (CommandRejected, MissionError, TypeError, ValueError) as exc:
                     ok, message = False, str(exc)
                     result = {"stage": "rejected"}
-                telemetry.last_command = (
-                    f"aircraft_{command.action}"
-                    if command.target == "aircraft"
-                    else command.action
-                )
+                if command.target in ("aircraft", "aircraft_1"):
+                    telemetry.last_command = f"aircraft_{command.action}"
+                elif command.target != "aircraft_2":
+                    telemetry.last_command = command.action
                 record_command_receipt(
                     telemetry,
                     target=command.target,
@@ -445,6 +504,11 @@ def run_agent(config: dict) -> int:
                 )
             transaction = aircraft_transport.pump(time.monotonic())
             telemetry.apply_aircraft_transaction(transaction)
+            if slave_transport is not None:
+                try:
+                    slave_transport.pump(time.monotonic())
+                except Exception as exc:
+                    print(f"slave transport isolated error: {exc}", flush=True)
             diagnostic = aircraft_transport.status()
             diagnostic_key = (
                 diagnostic.get("optical_state"),
@@ -490,8 +554,10 @@ def run_agent(config: dict) -> int:
                 and aircraft_signature != last_aircraft_report_signature
             )
             if now >= next_report or aircraft_changed:
-                payload = telemetry.tuya_compact_payload(
-                    aircraft_summary
+                payload = build_property_report(
+                    telemetry,
+                    aircraft_summary,
+                    slave_transport,
                 )
                 info = client.publish(report_topic, json.dumps(payload, separators=(",", ":")), qos=1)
                 next_report = now + report_interval

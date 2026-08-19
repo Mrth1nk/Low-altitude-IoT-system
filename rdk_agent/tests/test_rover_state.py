@@ -1,5 +1,6 @@
 import json
 import unittest
+from unittest.mock import patch
 
 from rover_state import (
     RoverCommand,
@@ -52,6 +53,55 @@ class RoverStateTests(unittest.TestCase):
             {"rover_state", "target_lat", "target_lng", "target_speed", "steering", "throttle"},
         )
         self.assertEqual(payload["data"]["steering"]["value"], "12")
+
+    def test_slave_state_is_added_beside_byte_identical_rover_state(self):
+        telemetry = RoverTelemetry(lat=1.2, lng=3.4, last_command="manual")
+        extra = {"aircraft_link": True, "aircraft_mode": "LOITER"}
+        with patch("rover_state.time.time", return_value=1800000000.0):
+            original = telemetry.tuya_compact_payload(extra)
+        slave = {
+            "online": True,
+            "fc_connected": True,
+            "blocked": False,
+            "mode": "GUIDED",
+            "armed": False,
+            "lat": 32.11974,
+            "lon": 118.95314,
+            "position_observed": True,
+            "altitude": 5.25,
+            "speed": 1.2,
+            "heading": 181.5,
+            "battery": 88,
+            "mission_stage": "EXECUTING",
+            "mission_id": "m" * 120,
+            "fault": "故障" * 200,
+            "link_state": "ONLINE",
+            "event": {"timestamp": 1000.0, "sequence": 9, "type": "MISSION", "text": "状态" * 200},
+        }
+
+        with patch("rover_state.time.time", return_value=1800000000.0):
+            combined = telemetry.tuya_compact_payload(extra, slave_state=slave)
+
+        self.assertEqual(
+            combined["data"]["rover_state"]["value"],
+            original["data"]["rover_state"]["value"],
+        )
+        encoded = combined["data"]["slave_state"]["value"]
+        self.assertLessEqual(len(encoded.encode("utf-8")), 480)
+        decoded = json.loads(encoded)
+        self.assertTrue(decoded["online"])
+        self.assertEqual(decoded["mode"], "GUIDED")
+        self.assertEqual(decoded["mission_stage"], "EXECUTING")
+
+    def test_no_slave_state_keeps_existing_cloud_property_set(self):
+        telemetry = RoverTelemetry()
+        payload = telemetry.tuya_compact_payload()
+
+        self.assertNotIn("slave_state", payload["data"])
+        self.assertEqual(
+            set(payload["data"]),
+            {"rover_state", "target_lat", "target_lng", "target_speed", "steering", "throttle"},
+        )
 
     def test_position_observation_distinguishes_real_zero_from_no_frame(self):
         telemetry = RoverTelemetry(lat=0.0, lng=0.0)
@@ -410,6 +460,26 @@ class RoverStateTests(unittest.TestCase):
         self.assertEqual(telemetry.aircraft_transaction_stage, "awaiting_ack")
         self.assertEqual(telemetry.aircraft_command_event_id, "rejected-id")
         self.assertEqual(telemetry.aircraft_command_event, "rejected")
+
+    def test_slave_receipt_does_not_overwrite_rover_or_main_aircraft_fields(self):
+        telemetry = RoverTelemetry(
+            mission_status="rover ready",
+            aircraft_transaction_stage="VERIFIED",
+            aircraft_command_event="accepted",
+        )
+
+        record_command_receipt(
+            telemetry,
+            target="aircraft_2",
+            command_id="slave-id",
+            accepted=False,
+            stage="FAILED",
+            message="slave offline",
+        )
+
+        self.assertEqual(telemetry.mission_status, "rover ready")
+        self.assertEqual(telemetry.aircraft_transaction_stage, "VERIFIED")
+        self.assertEqual(telemetry.aircraft_command_event, "accepted")
 
 
 if __name__ == "__main__":

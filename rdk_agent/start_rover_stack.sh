@@ -14,7 +14,7 @@ cd "$RDK_DIR"
 export PYTHONPATH="$REPO_ROOT${PYTHONPATH:+:$PYTHONPATH}"
 
 if [ "${IMPORT_CHECK_ONLY:-0}" = "1" ]; then
-  "${PYTHON_BIN:-python3}" -c "import shared_protocol; import aircraft_link; import aircraft_transport; import command_router"
+  "${PYTHON_BIN:-python3}" -c "import shared_protocol; import aircraft_link; import aircraft_transport; import command_router; import slave_transport"
   echo "runtime imports ok"
   exit 0
 fi

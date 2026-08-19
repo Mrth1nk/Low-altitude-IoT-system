@@ -491,6 +491,60 @@ def compact_json_bytes(data: dict[str, Any], max_bytes: int = 480) -> str:
     return dump({key: fallback[key] for key in core_keys if key in fallback})
 
 
+def compact_slave_state(data: dict[str, Any], max_bytes: int = 480) -> str:
+    """Serialize aircraft_2 independently without consuming rover_state bytes."""
+    if not isinstance(data, dict):
+        data = {}
+    event = data.get("event") if isinstance(data.get("event"), dict) else {}
+    compact = {
+        "updated_at": round(float(data.get("updated_at", 0) or 0), 3),
+        "online": bool(data.get("online", False)),
+        "fc_connected": bool(data.get("fc_connected", False)),
+        "blocked": bool(data.get("blocked", False)),
+        "link_state": str(data.get("link_state", "OFFLINE"))[:24],
+        "mode": str(data.get("mode", "UNKNOWN"))[:32],
+        "armed": bool(data.get("armed", False)),
+        "position_observed": bool(data.get("position_observed", False)),
+        "lat": round(float(data.get("lat", 0) or 0), 6),
+        "lon": round(float(data.get("lon", 0) or 0), 6),
+        "altitude": round(float(data.get("altitude", 0) or 0), 2),
+        "speed": round(float(data.get("speed", 0) or 0), 2),
+        "heading": round(float(data.get("heading", 0) or 0), 2),
+        "battery": round(float(data.get("battery", -1) or 0), 1),
+        "mission_stage": str(data.get("mission_stage", "IDLE"))[:24],
+        "mission_id": str(data.get("mission_id", ""))[:36],
+        "fault": str(data.get("fault", ""))[:96],
+        "event": {
+            "timestamp": round(float(event.get("timestamp", 0) or 0), 3),
+            "sequence": int(event.get("sequence", 0) or 0),
+            "type": str(event.get("type", "NONE"))[:16],
+            "text": str(event.get("text", ""))[:96],
+        },
+    }
+    dump = lambda value: json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+    text = dump(compact)
+    if len(text.encode("utf-8")) <= max_bytes:
+        return text
+    for limit in (64, 40, 24, 0):
+        compact["event"]["text"] = compact["event"]["text"][:limit]
+        compact["fault"] = compact["fault"][:limit]
+        text = dump(compact)
+        if len(text.encode("utf-8")) <= max_bytes:
+            return text
+    for key in ("battery", "speed", "heading", "mission_id", "fault", "event"):
+        compact.pop(key, None)
+        text = dump(compact)
+        if len(text.encode("utf-8")) <= max_bytes:
+            return text
+    return dump({
+        "updated_at": compact["updated_at"],
+        "online": compact["online"],
+        "link_state": compact["link_state"],
+        "mode": compact["mode"],
+        "armed": compact["armed"],
+    })
+
+
 @dataclass
 class RoverTelemetry:
     lat: float = 32.119740
@@ -645,7 +699,11 @@ class RoverTelemetry:
             "data": {k: {"value": v, "time": now_ms} for k, v in self.data().items()},
         }
 
-    def tuya_compact_payload(self, extra_state: dict[str, Any] | None = None) -> dict:
+    def tuya_compact_payload(
+        self,
+        extra_state: dict[str, Any] | None = None,
+        slave_state: dict[str, Any] | None = None,
+    ) -> dict:
         now_ms = int(time.time() * 1000)
         data = self.data()
         if extra_state:
@@ -658,6 +716,8 @@ class RoverTelemetry:
             "steering": str(data["steering"]),
             "throttle": str(data["throttle"]),
         }
+        if slave_state is not None:
+            cloud_data["slave_state"] = compact_slave_state(slave_state)
         return {
             "msgId": uuid.uuid4().hex,
             "time": now_ms,
@@ -674,12 +734,14 @@ def record_command_receipt(
     stage: str,
     message: str,
 ) -> None:
-    if target == "aircraft":
+    if target in ("aircraft", "aircraft_1"):
         telemetry.record_aircraft_command_event(
             command_id,
             "accepted" if accepted else "rejected",
             "" if accepted else message,
         )
+        return
+    if target == "aircraft_2":
         return
     telemetry.mission_status = message if accepted else "command_failed"
     telemetry.fault_text = "" if accepted else message

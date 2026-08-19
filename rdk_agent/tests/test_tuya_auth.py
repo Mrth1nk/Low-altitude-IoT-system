@@ -1,12 +1,71 @@
 import hashlib
 import hmac
 import unittest
+import json
+import os
+import tempfile
+from pathlib import Path
+from unittest.mock import patch
 
 import tuya_rover_agent
+from rover_state import RoverTelemetry
 from tuya_auth import build_tuya_credentials, make_topic
 
 
 class TuyaAuthTests(unittest.TestCase):
+
+    def test_slave_node_is_disabled_by_default_and_can_be_enabled_from_environment(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "config.json"
+            path.write_text(json.dumps({"device_id": "dev", "device_secret": "secret"}))
+            with patch.dict(os.environ, {}, clear=True):
+                disabled = tuya_rover_agent.load_config(path)
+            with patch.dict(os.environ, {"SLAVE_NODE_ENABLED": "1"}, clear=True):
+                enabled = tuya_rover_agent.load_config(path)
+
+        self.assertFalse(disabled["slave_node_enabled"])
+        self.assertTrue(enabled["slave_node_enabled"])
+        self.assertEqual(enabled["slave_peer_host"], "192.168.4.3")
+        self.assertEqual(enabled["slave_local_port"], 14610)
+        self.assertEqual(enabled["slave_peer_port"], 14620)
+        self.assertEqual(enabled["slave_max_attempts"], 6)
+
+    def test_one_property_report_contains_both_states_without_extra_report(self):
+        class Slave:
+            def snapshot(self):
+                return {
+                    "updated_at": 1000.0, "online": True, "fc_connected": True,
+                    "blocked": False, "link_state": "ONLINE", "mode": "GUIDED",
+                    "armed": False, "lat": 0.0, "lon": 0.0,
+                    "position_observed": True, "altitude": 0.0, "speed": 0.0,
+                    "heading": 0.0, "battery": 100, "mission_stage": "IDLE",
+                    "mission_id": "", "fault": "",
+                    "event": {"timestamp": 1000.0, "sequence": 1, "type": "HEARTBEAT", "text": "ok"},
+                }
+
+        payload = tuya_rover_agent.build_property_report(
+            RoverTelemetry(), {"aircraft_link": True}, Slave()
+        )
+
+        self.assertIn("rover_state", payload["data"])
+        self.assertIn("slave_state", payload["data"])
+        self.assertEqual(
+            payload["data"]["rover_state"]["time"],
+            payload["data"]["slave_state"]["time"],
+        )
+
+    def test_slave_snapshot_failure_isolated_from_existing_report(self):
+        class BrokenSlave:
+            def snapshot(self):
+                raise OSError("slave unavailable")
+
+        telemetry = RoverTelemetry()
+        payload = tuya_rover_agent.build_property_report(
+            telemetry, {"aircraft_link": True}, BrokenSlave()
+        )
+
+        self.assertIn("rover_state", payload["data"])
+        self.assertNotIn("slave_state", payload["data"])
     def test_build_tuya_credentials_uses_tuya_username_shape_and_hmac(self):
         creds = build_tuya_credentials("dev001", "secret", 1700000000)
         expected_username = "dev001|signMethod=hmacSha256,timestamp=1700000000,secureMode=1,accessType=1"
