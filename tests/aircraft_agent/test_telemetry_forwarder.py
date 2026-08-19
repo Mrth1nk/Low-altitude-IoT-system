@@ -47,6 +47,16 @@ class MavlinkTelemetryForwarderTests(unittest.TestCase):
         forwarder.drain_to(stream, allowed=True)
         self.assertEqual(stream.frames, [])
 
+    def test_queues_generated_mavlink2_frame_on_existing_stream(self):
+        forwarder = MavlinkTelemetryForwarder()
+        stream = FakeStream()
+        frame = b"\xfd\x00\x00\x00\x00\x01\x01\x90\x00\x00\x00\x00"
+
+        self.assertTrue(forwarder.enqueue(frame))
+        forwarder.drain_to(stream, allowed=True)
+
+        self.assertEqual(stream.frames, [frame])
+
 
 if __name__ == "__main__":
     unittest.main()

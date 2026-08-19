@@ -11,6 +11,7 @@ import threading
 import time
 
 from .command_worker import AircraftCommandWorker
+from .follow_target import FollowTargetPublisher
 from .inbox import DurableInbox
 from .link_server import AircraftLinkServer
 from .mavlink_session import MavlinkSession
@@ -232,10 +233,18 @@ class MavlinkTelemetryForwarder:
         frame = bytes(getter() or b"") if callable(getter) else b""
         if not frame or frame[0] not in (0xFD, 0xFE):
             return
+        self.enqueue(frame)
+
+    def enqueue(self, frame):
+        frame = bytes(frame)
+        if not frame or frame[0] not in (0xFD, 0xFE):
+            return False
         try:
             self.frames.put_nowait(frame)
+            return True
         except queue.Full:
             self.dropped += 1
+            return False
 
     def drain_to(self, stream, *, allowed, limit=32):
         sent = 0
@@ -295,8 +304,13 @@ def run():
     )
     heartbeat = HeartbeatMonitor()
     telemetry_forwarder = MavlinkTelemetryForwarder()
+    follow_target = FollowTargetPublisher(
+        rate_hz=float(os.environ.get("FOLLOW_TARGET_RATE_HZ", "10")),
+        max_age_s=float(os.environ.get("FOLLOW_TARGET_MAX_AGE", "1.5")),
+    )
     session.subscribe(heartbeat.observe)
     session.subscribe(telemetry_forwarder.observe)
+    session.subscribe(follow_target.observe)
     session.start_reader()
     for message_id, interval_us in (
         (1, 500_000),   # SYS_STATUS: 2 Hz
@@ -354,6 +368,12 @@ def run():
         while not stop.is_set():
             optical = optical_reader.read()
             _apply_gate(gate, optical)
+            try:
+                follow_frame = follow_target.next_frame()
+                if follow_frame is not None:
+                    telemetry_forwarder.enqueue(follow_frame)
+            except Exception as exc:
+                last_error = f"follow_target:{type(exc).__name__}:{exc}"[:256]
             telemetry_forwarder.drain_to(
                 stream,
                 allowed=optical.get("locked") is True
@@ -384,6 +404,7 @@ def run():
                     "bytes": server.metrics.get("mavlink_bytes", 0),
                 }
                 health_doc["wifi_link"] = dict(server.metrics)
+                health_doc["follow_target"] = follow_target.snapshot()
                 health.store.save(health_doc)
                 next_health = now + 0.5
     finally:
