@@ -1,0 +1,26 @@
+[Unit]
+Description=Low-altitude slave aircraft RDK service
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=60
+StartLimitBurst=3
+
+[Service]
+Type=simple
+User=sunrise
+Group=sunrise
+SupplementaryGroups=dialout
+WorkingDirectory=/opt/low-altitude-iot/current
+EnvironmentFile=/etc/low-altitude-iot/slave.env
+Environment=SLAVE_STATE_DIR=/var/lib/low-altitude-iot/slave
+ExecStartPre=/usr/local/lib/low-altitude-iot/health_slave.sh --preflight
+ExecStart=/usr/bin/python3 -m slave_agent.main
+Restart=on-failure
+RestartSec=2
+StateDirectory=low-altitude-iot/slave
+UMask=0077
+NoNewPrivileges=yes
+PrivateTmp=yes
+
+[Install]
+WantedBy=multi-user.target

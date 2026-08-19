@@ -10,6 +10,8 @@ This workspace contains the competition IoT rover stack built around:
 - ArduPilot Rover flight controller for car motion control.
 - `mengchuang` serial Wi-Fi telemetry link for aircraft MAVLink messages between the aircraft board and RDK.
 - Browser ground stations for local RDK debugging and Tuya-cloud operation.
+- A second RDK X5 slave-aircraft node using typed UDP through the shared
+  `woshinailong` link; the rover RDK remains the only Tuya/L610 gateway.
 
 The current operational goal is: keep RDK controllable over SSH during development, keep cloud traffic on L610 during demos, and only switch RDK Wi-Fi to `mengchuang` at the final aircraft-link demo step.
 
@@ -23,6 +25,8 @@ The current operational goal is: keep RDK controllable over SSH during developme
 - `docs/superpowers/`: Earlier design and implementation plan notes.
 - `docs/codex_context.md`: Condensed operational context from the Codex session.
 - `wifi_telemetry_gateway.py` and `aircraft_status_server.py`: Earlier local-machine aircraft telemetry helpers kept for reference.
+- `slave_agent/`: second-aircraft RDK service and local flight-controller owner.
+- `shared_protocol/`: strict typed coordinator/slave UDP messages.
 
 ## Important Hosts And Paths
 
@@ -123,6 +127,13 @@ http://127.0.0.1:5178/
 - Keep manual rover control conservative: stop is always safe, throttle/steering are bounded, and command timeouts should neutralize control.
 - Prefer small, testable modules. Add tests under `uav_tuya_agent/tests/` for protocol or safety changes.
 - Do not rely on local computer Wi-Fi for final aircraft telemetry. Final path is aircraft telemetry module <-> RDK Wi-Fi <-> RDK agent <-> Tuya/L610 <-> cloud ground station.
+- Keep `aircraft` as the compatibility alias for main `aircraft_1`; use
+  `aircraft_2` only for the new slave. Never share transaction state or mission
+  queues across the two aircraft.
+- Slave fixed topology is rover `192.168.4.2:14610` and slave
+  `192.168.4.3:14620`. Slave FC access must use `/dev/serial/by-id/...`.
+- Slave `OFFLINE` and optical `BLOCKED` are distinct. The initial slave gate is
+  disabled but its interface must remain replaceable.
 
 ## Known Current Risk
 

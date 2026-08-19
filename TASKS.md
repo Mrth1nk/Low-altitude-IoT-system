@@ -1,5 +1,28 @@
 # TASKS.md
 
+## 2026-08-19 Dual-Aircraft RDK Extension
+
+### Completed
+
+- Tagged and pushed the verified single-aircraft recovery baseline.
+- Defined a typed, checksummed and sequence-correlated slave-node protocol.
+- Added a durable slave RDK command/mission service with a reserved optical
+  gate and one exclusive local MAVLink owner.
+- Added transactional slave install, health and rollback tooling without a
+  board reboot.
+
+### In Progress
+
+- Integrating `aircraft_2` routing, compact `slave_state`, ground-station tabs,
+  device deployment and real two-client link verification.
+
+### Remaining
+
+1. Add the Tuya `slave_state` string property with a 480-byte-compatible limit.
+2. Verify both RDKs on `woshinailong`, including ACK, heartbeat, stale recovery
+   and mission readback with propellers removed.
+3. Push and tag the verified dual-aircraft release.
+
 ## 2026-08-06 Precision Landing Final Descent
 
 ### Completed

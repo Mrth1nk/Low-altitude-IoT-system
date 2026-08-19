@@ -1,5 +1,17 @@
 # CHANGELOG.md
 
+## 2026-08-19
+
+- Preserved the successful single-aircraft system with recovery tag
+  `national-finals-single-aircraft-baseline-20260819`.
+- Added strict typed UDP messages for a second RDK-X5 aircraft node, including
+  node identity, sequence, command ID, status, ACK/NACK and mission digest.
+- Added the slave RDK runtime with durable admission, deduplication, ordered
+  mission execution, flight-controller verification and a reserved optical
+  gate that defaults to unblocked.
+- Added atomic slave installation, fixed `by-id` flight-controller preflight,
+  serial ownership checks, health checks and rollback support.
+
 ## 2026-08-06
 
 - Added a configurable precision-landing final-descent cutoff at 0.25 m.

@@ -71,3 +71,18 @@ logs; the preflight itself intentionally performs no recovery action.
 
 This runbook records software readiness only. Outdoor navigation, takeoff,
 landing, and motor behavior require a separate supervised field checklist.
+
+## Dual-aircraft additions
+
+Before the dual-aircraft rehearsal, also run on the slave RDK:
+
+```bash
+sudo /usr/local/lib/low-altitude-iot/health_slave.sh
+```
+
+Confirm the rover coordinator is `192.168.4.2:14610`, the slave is
+`192.168.4.3:14620`, both use `woshinailong`, and the rover cloud default route
+still uses L610. Verify main and slave commands independently, then stop slave
+status transmission and confirm only the slave becomes `OFFLINE` after three
+seconds. The initial slave optical gate is disabled; `OFFLINE` must never be
+presented as `BLOCKED`.
