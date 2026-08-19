@@ -7,6 +7,10 @@ SOURCE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 BACKUP_DIR=
 COMMITTED=0
 legacy_state=
+AIRCRAFT_WAS_ENABLED=unknown
+AIRCRAFT_WAS_ACTIVE=unknown
+VISION_WAS_ENABLED=unknown
+VISION_WAS_ACTIVE=unknown
 LEGACY_SERVICES=(
   light-wifi-bridge.service
   onboard_bridge.service
@@ -43,6 +47,12 @@ restore_legacy_services() {
   done < "$legacy_state"
 }
 
+restore_service_state() {
+  local service=$1 enabled=$2 active=$3
+  [[ "$enabled" == enabled ]] && systemctl enable "$service" || systemctl disable "$service"
+  [[ "$active" == active ]] && systemctl restart "$service" || systemctl stop "$service"
+}
+
 rollback() {
   local rc=$?
   ((COMMITTED)) && return "$rc"
@@ -64,6 +74,10 @@ rollback() {
       done
       systemctl daemon-reload || true
     fi
+    restore_service_state low-altitude-aircraft.service \
+      "$AIRCRAFT_WAS_ENABLED" "$AIRCRAFT_WAS_ACTIVE" || true
+    restore_service_state low-altitude-vision.service \
+      "$VISION_WAS_ENABLED" "$VISION_WAS_ACTIVE" || true
     restore_legacy_services || true
   fi
   return "$rc"
@@ -88,6 +102,10 @@ if ((!DRY_RUN)); then
     echo "AIRCRAFT_LINK_PSK missing or too short" >&2
     exit 1
   }
+  systemctl is-enabled --quiet low-altitude-aircraft.service && AIRCRAFT_WAS_ENABLED=enabled || AIRCRAFT_WAS_ENABLED=disabled
+  systemctl is-active --quiet low-altitude-aircraft.service && AIRCRAFT_WAS_ACTIVE=active || AIRCRAFT_WAS_ACTIVE=inactive
+  systemctl is-enabled --quiet low-altitude-vision.service && VISION_WAS_ENABLED=enabled || VISION_WAS_ENABLED=disabled
+  systemctl is-active --quiet low-altitude-vision.service && VISION_WAS_ACTIVE=active || VISION_WAS_ACTIVE=inactive
 fi
 
 BACKUP_DIR="$(dest /var/backups/low-altitude-iot)/aircraft-$(date +%Y%m%d%H%M%S)-$$"
@@ -166,8 +184,10 @@ EOF
 fi
 
 run systemctl daemon-reload
-run systemctl enable --now low-altitude-aircraft.service
-run systemctl enable --now low-altitude-vision.service
+run systemctl enable low-altitude-aircraft.service
+run systemctl enable low-altitude-vision.service
+run systemctl restart low-altitude-aircraft.service
+run systemctl restart low-altitude-vision.service
 say "HEALTH: validate atomic state, heartbeat and exclusive process roles"
 if ((DRY_RUN)); then
   run "$(dest /usr/local/lib/low-altitude-iot/health_aircraft.sh)" --dry-run
