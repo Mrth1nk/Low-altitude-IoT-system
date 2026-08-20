@@ -1,5 +1,33 @@
 # TASKS.md
 
+## 2026-08-20 Dual-UAV Follow
+
+### Completed
+
+- Added slave phone-hotspot maintenance switching without adding a visible
+  ground-station control.
+- Added safe indoor `0,0` slave position reporting and removed all mission
+  transaction lamps.
+- Added the ELF Follow target publisher, Rover fixed-peer relay, slave
+  fixed-peer receiver, and follower-only ground-station control.
+- Added recoverable Follow parameter configuration for system ID 2, leader
+  system ID 1, heading-relative 5 m left offset, and same physical elevation.
+- Added Follow health counters and fixed atomic aircraft service restart and
+  rollback-state handling.
+- Verified the repository with 345 Python tests (1 OpenCV skip), 47 Node tests,
+  compile checks, shell checks, and whitespace checks.
+- Deployed the main ELF release without rebooting and verified both aircraft
+  and vision services plus the new Follow publisher health snapshot.
+
+### Remaining
+
+1. Deploy the slave and Rover releases after the development computer is
+   reconnected to the phone hotspot.
+2. Apply and read back the slave Follow parameters while disarmed, preserving
+   the generated restore bundle.
+3. Put both RDKs on `woshinailong` and perform a propeller-off end-to-end frame
+   counter test; outdoor Follow flight remains a separate supervised step.
+
 ## 2026-08-19 Dual-Aircraft RDK Extension
 
 ### Completed

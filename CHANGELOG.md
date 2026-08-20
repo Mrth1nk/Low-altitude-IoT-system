@@ -1,5 +1,24 @@
 # CHANGELOG.md
 
+## 2026-08-20
+
+- Added a hidden, typed `aircraft_2/network_phone` maintenance command and a
+  root-owned NetworkManager switch path for recovering slave RDK SSH access.
+- Preserved observed indoor slave coordinates as `0,0` while keeping them
+  ineligible for map navigation, missions, or Follow publication.
+- Removed the rover, main-aircraft, and slave mission transaction lamps from
+  the ground station and added a follower-only `FOLLOW` control.
+- Added a 10 Hz standard MAVLink2 `FOLLOW_TARGET` publisher on the main ELF,
+  a strict Rover relay to `192.168.4.3:14630`, and a fixed-peer slave receiver
+  that writes through the existing single-owner MAVLink session.
+- Added recoverable ArduCopter Follow configuration for a heading-relative
+  5 m left offset at the same physical elevation. Every changed parameter is
+  snapshotted and a restore script is persisted before the first write.
+- Extended aircraft and slave health checks with Follow publisher/receiver
+  counters and fixed aircraft installation so an existing service is actually
+  restarted after an atomic release switch and restored to its prior state on
+  rollback.
+
 ## 2026-08-19
 
 - Preserved the successful single-aircraft system with recovery tag
