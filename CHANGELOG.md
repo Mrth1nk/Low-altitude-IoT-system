@@ -20,6 +20,12 @@
   counters and fixed aircraft installation so an existing service is actually
   restarted after an atomic release switch and restored to its prior state on
   rollback.
+- Deployed all three node releases without rebooting, verified fixed serial
+  identities and service health, and applied/read back the complete follower
+  parameter set after restoring the original baseline.
+- Allowed the hidden slave phone-network maintenance command to bypass the
+  flight-command offline gate while keeping that gate for actual flight modes,
+  arming, missions, and Follow.
 
 ## 2026-08-19
 

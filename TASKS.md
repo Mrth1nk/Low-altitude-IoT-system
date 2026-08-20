@@ -14,18 +14,22 @@
   system ID 1, heading-relative 5 m left offset, and same physical elevation.
 - Added Follow health counters and fixed atomic aircraft service restart and
   rollback-state handling.
-- Verified the repository with 345 Python tests (1 OpenCV skip), 47 Node tests,
+- Verified the repository with 347 Python tests (1 OpenCV skip), 48 Node tests,
   compile checks, shell checks, and whitespace checks.
 - Deployed the main ELF release without rebooting and verified both aircraft
   and vision services plus the new Follow publisher health snapshot.
+- Deployed the Rover and slave RDK releases without rebooting. The Rover kept
+  L610 as its cloud route; the slave passed fixed-`by-id` Copter heartbeat,
+  UDP 14620/14630, and exclusive serial-owner checks.
+- Restored the slave's exact pre-change parameter baseline, then applied and
+  read back the complete Follow configuration. The final pre-write snapshot
+  and restore script are stored under `/home/sunrise/follow-backups/final/`.
 
 ### Remaining
 
-1. Deploy the slave and Rover releases after the development computer is
-   reconnected to the phone hotspot.
-2. Apply and read back the slave Follow parameters while disarmed, preserving
-   the generated restore bundle.
-3. Put both RDKs on `woshinailong` and perform a propeller-off end-to-end frame
+1. Put both RDKs on `woshinailong` and diagnose the previously observed stale
+   slave status using the fixed-peer UDP counters on both ends.
+2. Perform a propeller-off end-to-end Follow frame
    counter test; outdoor Follow flight remains a separate supervised step.
 
 ## 2026-08-19 Dual-Aircraft RDK Extension
