@@ -286,6 +286,12 @@ function buildCommandsBody(properties) {
   };
 }
 
+function requiresAircraftGate(command) {
+  const action = String(command?.command || command?.action || "");
+  const maintenance = action === "network_phone" || action === "network_aircraft";
+  return isAircraftCommand(command) && !maintenance;
+}
+
 function buildAircraftMissionFragments(command) {
   if (command?.command !== "aircraft_mission" || !Array.isArray(command?.payload?.items)) {
     throw new Error("aircraft mission items are required");
@@ -331,7 +337,7 @@ function buildAircraftMissionFragments(command) {
 }
 
 async function sendCommand(command, options = {}) {
-  if (!options.skipGate && isAircraftCommand(command)) {
+  if (!options.skipGate && requiresAircraftGate(command)) {
     const gateState = FAKE_TUYA ? lastState : await fetchState();
     const target = command.target === "aircraft_2" ? "aircraft_2" : "aircraft";
     if (!gateState || !aircraftCommandsAllowed(gateState, target)) {
@@ -552,6 +558,7 @@ module.exports = {
   fetchState,
   normalizeStatus,
   preserveAircraftDetails,
+  requiresAircraftGate,
   sendCommand,
   signHeaders,
   startServer,

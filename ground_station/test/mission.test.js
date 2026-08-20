@@ -14,7 +14,12 @@ const {
   routeSegmentDistances,
   switchAircraftAltitude,
 } = require("../public/core.js");
-const {buildAircraftMissionFragments, buildCommandsBody, buildIssueBody} = require("../server.js");
+const {
+  buildAircraftMissionFragments,
+  buildCommandsBody,
+  buildIssueBody,
+  requiresAircraftGate,
+} = require("../server.js");
 
 const points = [
   {lat: 32.1197, lng: 118.9531, speed: 0.8},
@@ -324,6 +329,17 @@ test("server property filter preserves hidden network mode commands", () => {
     {
       command: "network_phone",
     },
+  );
+});
+
+test("slave maintenance network command bypasses offline flight gate", () => {
+  assert.equal(
+    requiresAircraftGate({command: "network_phone", target: "aircraft_2"}),
+    false,
+  );
+  assert.equal(
+    requiresAircraftGate({command: "aircraft_follow", target: "aircraft_2"}),
+    true,
   );
 });
 
