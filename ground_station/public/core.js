@@ -588,12 +588,26 @@
     return 20;
   }
 
+  function composeDriveKeys(keys) {
+    const held = new Set(
+      Array.from(keys || [], (key) => String(key).toLowerCase()),
+    );
+    const forward = held.has("w") || held.has("arrowup");
+    const reverse = held.has("s") || held.has("arrowdown");
+    const left = held.has("a") || held.has("arrowleft");
+    const right = held.has("d") || held.has("arrowright");
+    const steering = (right ? 100 : 0) - (left ? 100 : 0);
+    const throttle = (forward ? 100 : 0) - (reverse ? 100 : 0);
+    return steering || throttle ? [steering, throttle] : null;
+  }
+
   return {
     MAX_MISSION_ITEMS,
     appendAircraftMessages,
     aircraftCommandsAllowed,
     aircraftHeartbeatSummary,
     buildMissionCommand,
+    composeDriveKeys,
     createGroundStationStores,
     distanceMeters,
     filterCommandProperties,

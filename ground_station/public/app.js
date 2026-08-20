@@ -62,7 +62,10 @@ let mapFallback = {...FALLBACK};
 let roverTrack = [];
 let arrivalKey = "";
 let driveTimer = null;
-let activeKey = "";
+const DRIVE_KEYS = new Set([
+  "w", "a", "s", "d", "arrowup", "arrowdown", "arrowleft", "arrowright",
+]);
+const heldDriveKeys = new Set();
 
 function escapeHtml(value) {
   return String(value ?? "").replace(/[&<>"']/g, (char) => ({
@@ -610,24 +613,40 @@ function startDrive(button) {
     Number(button.dataset.steering),
     Number(button.dataset.throttle),
   );
+  startDrivePayload(payload);
+}
+
+function startDrivePayload(payload) {
   postCommand(payload);
   clearInterval(driveTimer);
   driveTimer = setInterval(() => postCommand(payload, {quiet: true}), 250);
 }
 
-function stopDrive() {
+function stopDriveRefresh() {
   if (!driveTimer) return;
   clearInterval(driveTimer);
   driveTimer = null;
+}
+
+function stopDrive() {
+  const wasDriving = Boolean(driveTimer);
+  stopDriveRefresh();
+  if (!wasDriving) return;
   postCommand({command: "stop", steering: 0, throttle: 0}, {quiet: true});
 }
 
-function keyDrive(key) {
-  if (key === "ArrowUp" || key.toLowerCase() === "w") return [0, 100];
-  if (key === "ArrowDown" || key.toLowerCase() === "s") return [0, -100];
-  if (key === "ArrowLeft" || key.toLowerCase() === "a") return [-100, 0];
-  if (key === "ArrowRight" || key.toLowerCase() === "d") return [100, 0];
-  return null;
+function driveKey(key) {
+  const normalized = String(key).toLowerCase();
+  return DRIVE_KEYS.has(normalized) ? normalized : "";
+}
+
+function syncKeyboardDrive() {
+  const drive = Core.composeDriveKeys(heldDriveKeys);
+  if (!drive) {
+    stopDriveRefresh();
+    return;
+  }
+  startDrivePayload(drivePayload(drive[0], drive[1]));
 }
 
 async function refresh() {
@@ -698,18 +717,19 @@ for (const button of document.querySelectorAll("[data-steering]")) {
   button.addEventListener("pointercancel", stopDrive);
 }
 window.addEventListener("keydown", (event) => {
-  const drive = keyDrive(event.key);
-  if (!drive || activeKey || ["INPUT", "TEXTAREA"].includes(document.activeElement?.tagName)) return;
+  const key = driveKey(event.key);
+  if (!key || ["INPUT", "TEXTAREA"].includes(document.activeElement?.tagName)) return;
   event.preventDefault();
-  activeKey = event.key;
-  const fakeButton = {dataset: {steering: drive[0], throttle: drive[1]}};
-  startDrive(fakeButton);
+  if (heldDriveKeys.has(key)) return;
+  heldDriveKeys.add(key);
+  syncKeyboardDrive();
 });
 window.addEventListener("keyup", (event) => {
-  if (event.key !== activeKey) return;
+  const key = driveKey(event.key);
+  if (!key || !heldDriveKeys.has(key)) return;
   event.preventDefault();
-  activeKey = "";
-  stopDrive();
+  heldDriveKeys.delete(key);
+  syncKeyboardDrive();
 });
 
 setVehicleMode("rover");

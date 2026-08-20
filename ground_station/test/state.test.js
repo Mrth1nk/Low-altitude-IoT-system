@@ -9,10 +9,22 @@ const {
   appendAircraftMessages,
   aircraftCommandsAllowed,
   aircraftHeartbeatSummary,
+  composeDriveKeys,
   normalizeCloudState,
   formatObservedPosition,
   transactionTimeline,
 } = require("../public/core.js");
+
+test("combines simultaneous WASD keys into rover steering and throttle", () => {
+  assert.deepEqual(composeDriveKeys(new Set(["w", "a"])), [-100, 100]);
+  assert.deepEqual(composeDriveKeys(new Set(["S", "D"])), [100, -100]);
+});
+
+test("opposite drive keys cancel independently and unrelated keys are ignored", () => {
+  assert.deepEqual(composeDriveKeys(new Set(["w", "s", "a"])), [-100, 0]);
+  assert.equal(composeDriveKeys(new Set(["w", "s", "a", "d"])), null);
+  assert.equal(composeDriveKeys(new Set(["Shift", "x"])), null);
+});
 
 test("one cloud response independently normalizes main and slave aircraft state", () => {
   const state = normalizeCloudState([
