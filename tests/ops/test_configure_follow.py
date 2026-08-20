@@ -31,15 +31,32 @@ class Mav:
 
     def param_set_send(self, _system, _component, name, value, param_type):
         name = name.decode().rstrip("\x00")
+        old_value = self.connection.values[name]
         self.set_calls.append((name, float(value), int(param_type)))
         self.connection.values[name] = float(value)
+        if self.connection.stale_write_echo:
+            self.connection.responses.extend(
+                [
+                    (name, old_value),
+                    (name, float(value)),
+                ]
+            )
         self.connection.requested = name
 
 
 class Connection:
-    def __init__(self, values=None, *, vehicle_type=2, armed=False):
+    def __init__(
+        self,
+        values=None,
+        *,
+        vehicle_type=2,
+        armed=False,
+        stale_write_echo=False,
+    ):
         self.values = dict(values or {name: 0.0 for name in FOLLOW_VALUES})
         self.requested = None
+        self.responses = []
+        self.stale_write_echo = bool(stale_write_echo)
         self.target_system = 2
         self.target_component = 1
         self.heartbeat = Message(
@@ -55,6 +72,14 @@ class Connection:
 
     def recv_match(self, type=None, blocking=True, timeout=None):
         del type, blocking, timeout
+        if self.responses:
+            name, value = self.responses.pop(0)
+            return Message(
+                "PARAM_VALUE",
+                param_id=name,
+                param_value=value,
+                param_type=9,
+            )
         if self.requested not in self.values:
             return None
         name = self.requested
@@ -106,6 +131,43 @@ class FollowConfigurationTests(unittest.TestCase):
                 {name: connection.values[name] for name in FOLLOW_VALUES},
                 {name: float(value) for name, value in FOLLOW_VALUES.items()},
             )
+
+    def test_apply_ignores_stale_parameter_echo_before_confirming_new_value(self):
+        connection = Connection(stale_write_echo=True)
+        snapshot = collect_follow_snapshot(
+            connection,
+            device="/dev/serial/by-id/usb-ArduPilot-test-if00",
+            timeout=0.1,
+        )
+
+        result = apply_follow_values(connection, snapshot, timeout=0.1)
+
+        self.assertTrue(result["verified"])
+        self.assertEqual(connection.values["FOLL_OFS_Y"], -5.0)
+
+    def test_unconfirmed_but_applied_parameter_is_included_in_rollback(self):
+        class LostConfirmationConnection(Connection):
+            def recv_match(self, type=None, blocking=True, timeout=None):
+                if (
+                    self.requested == "FOLL_OFS_Y"
+                    and self.values["FOLL_OFS_Y"] == -5.0
+                ):
+                    self.requested = None
+                    return None
+                return super().recv_match(type=type, blocking=blocking, timeout=timeout)
+
+        original = {name: 0.0 for name in FOLLOW_VALUES}
+        connection = LostConfirmationConnection(original)
+        snapshot = collect_follow_snapshot(
+            connection,
+            device="/dev/serial/by-id/usb-ArduPilot-test-if00",
+            timeout=0.001,
+        )
+
+        with self.assertRaises(FollowConfigurationError):
+            apply_follow_values(connection, snapshot, timeout=0.001)
+
+        self.assertEqual(connection.values, original)
 
     def test_rejects_armed_non_copter_wrong_device_and_missing_parameter(self):
         cases = [

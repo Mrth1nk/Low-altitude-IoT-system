@@ -43,10 +43,11 @@ def _parameter_name(message):
     return str(raw).rstrip("\x00").strip().upper()
 
 
-def _read_parameter(connection, name, timeout):
+def _read_parameter(connection, name, timeout, *, expected=None):
     target_system = int(getattr(connection, "target_system", 1) or 1)
     target_component = int(getattr(connection, "target_component", 1) or 1)
     encoded = name.encode("ascii")
+    last_observed = None
     for _attempt in range(3):
         connection.mav.param_request_read_send(
             target_system,
@@ -64,10 +65,15 @@ def _read_parameter(connection, name, timeout):
             if message is None:
                 break
             if _parameter_name(message) == name:
-                return {
+                observed = {
                     "value": float(_field(message, "param_value", 0.0)),
                     "type": int(_field(message, "param_type", 9) or 9),
                 }
+                last_observed = observed
+                if expected is None or abs(observed["value"] - float(expected)) <= 1e-4:
+                    return observed
+    if last_observed is not None:
+        return last_observed
     raise FollowConfigurationError(f"missing parameter {name}")
 
 
@@ -123,7 +129,12 @@ def _write_and_verify(connection, name, value, param_type, timeout):
     )
     if name == "SYSID_THISMAV":
         connection.target_system = int(value)
-    observed = _read_parameter(connection, name, timeout)
+    observed = _read_parameter(
+        connection,
+        name,
+        timeout,
+        expected=value,
+    )
     if abs(observed["value"] - float(value)) > 1e-4:
         raise FollowConfigurationError(
             f"readback failed for {name}: expected {value}, got {observed['value']}"
@@ -141,6 +152,9 @@ def apply_parameter_values(connection, snapshot, values, *, timeout=1.0):
     written = []
     try:
         for name in _application_order(values):
+            # Include the in-flight parameter in rollback: a controller may
+            # apply PARAM_SET before its confirming PARAM_VALUE reaches us.
+            written.append(name)
             _write_and_verify(
                 connection,
                 name,
@@ -148,7 +162,6 @@ def apply_parameter_values(connection, snapshot, values, *, timeout=1.0):
                 parameters[name]["type"],
                 timeout,
             )
-            written.append(name)
     except Exception:
         for name in reversed(written):
             try:

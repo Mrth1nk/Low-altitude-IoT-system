@@ -14,6 +14,8 @@
 - Added recoverable ArduCopter Follow configuration for a heading-relative
   5 m left offset at the same physical elevation. Every changed parameter is
   snapshotted and a restore script is persisted before the first write.
+- Made Follow parameter readback tolerate stale queued `PARAM_VALUE` replies
+  and include an applied-but-unconfirmed parameter in automatic rollback.
 - Extended aircraft and slave health checks with Follow publisher/receiver
   counters and fixed aircraft installation so an existing service is actually
   restarted after an atomic release switch and restored to its prior state on

@@ -81,9 +81,9 @@ is stopped so no second process owns the flight-controller serial device:
 
 ```bash
 sudo systemctl stop low-altitude-slave.service
-sudo /usr/local/lib/low-altitude-iot/configure_follow.py \
+sudo -u sunrise -H /usr/local/lib/low-altitude-iot/configure_follow.py \
   --connection /dev/serial/by-id/REPLACE_WITH_REAL_FLIGHT_CONTROLLER_ID \
-  --baud 115200 --apply
+  --baud 115200 --backup-dir /home/sunrise/follow-backups --apply
 sudo systemctl start low-altitude-slave.service
 sudo /usr/local/lib/low-altitude-iot/health_slave.sh
 ```
