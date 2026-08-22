@@ -79,7 +79,10 @@
     <section class="vehicle-panel aircraft-panel">
       <div class="section-heading">
         <div><span class="eyebrow">AIRCRAFT</span><h2 id="aircraftPanelTitle">主机任务</h2></div>
-        <span id="opticalBadge" class="badge">等待状态</span>
+        <div class="aircraft-heading-actions">
+          <button id="gestureControlBtn" class="icon-command secondary" type="button" title="手势控制" aria-label="打开手势控制"><i data-lucide="camera"></i></button>
+          <span id="opticalBadge" class="badge">等待状态</span>
+        </div>
       </div>
       <div class="aircraft-tabs" role="tablist" aria-label="飞机选择">
         <button id="mainAircraftTab" class="active" type="button" role="tab">主机 1</button>
@@ -116,8 +119,36 @@
       <button id="closeArrivalModal">确认</button>
     </section>
   </div>
+  <div id="gestureModal" class="modal gesture-modal" hidden>
+    <div class="modal-backdrop" data-gesture-close></div>
+    <section class="modal-window gesture-window" role="dialog" aria-modal="true" aria-labelledby="gestureTitle">
+      <header class="gesture-window-header">
+        <div><span class="eyebrow">EDGE AI</span><h2 id="gestureTitle">手势控制</h2></div>
+        <button id="closeGestureModal" class="icon-command secondary" type="button" title="关闭" aria-label="关闭手势控制"><i data-lucide="x"></i></button>
+      </header>
+      <div class="gesture-preview">
+        <video id="gestureVideo" playsinline muted></video>
+        <canvas id="gestureCanvas"></canvas>
+        <span id="gestureCameraState" class="gesture-camera-state">摄像头未启动</span>
+      </div>
+      <div class="gesture-readout" aria-live="polite">
+        <div><span>目标</span><strong id="gestureTarget">主机 1</strong></div>
+        <div><span>手势</span><strong id="gestureGesture">-</strong></div>
+        <div><span>置信度</span><strong id="gestureConfidence">-</strong></div>
+      </div>
+      <div class="gesture-progress-row">
+        <span id="gestureStatus">待命</span>
+        <progress id="gestureProgress" max="1" value="0"></progress>
+      </div>
+      <label class="gesture-enable"><input id="gestureEnabled" type="checkbox"> 手势控制</label>
+    </section>
+  </div>
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <script src="/vendor/lucide/lucide.min.js"></script>
+  <script>window.lucide.createIcons();</script>
   <script src="/core.js"></script>
+  <script src="/gesture-core.js"></script>
   <script src="/app.js"></script>
+  <script type="module" src="/gesture-runtime.js"></script>
 </body>
 </html>

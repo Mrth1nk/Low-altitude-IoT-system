@@ -76,6 +76,17 @@ h3 { font-size: 14px; }
   gap: 8px;
 }
 .section-heading { margin-bottom: 7px; }
+.aircraft-heading-actions { display: flex; align-items: center; gap: 6px; }
+.aircraft-heading-actions .icon-command,
+.gesture-window-header .icon-command {
+  display: inline-grid;
+  width: 32px;
+  min-width: 32px;
+  padding: 0;
+  place-items: center;
+}
+.aircraft-heading-actions .icon-command svg,
+.gesture-window-header .icon-command svg { width: 17px; height: 17px; }
 .eyebrow { display: block; color: var(--muted); font-size: 10px; font-weight: 800; }
 .mode-switch {
   display: grid;
@@ -326,9 +337,46 @@ pre {
 .modal { position: fixed; inset: 0; z-index: 1100; }
 .modal-backdrop { position: absolute; inset: 0; background: rgba(15,23,42,.44); }
 .modal-window { position: absolute; top: 50%; left: 50%; width: min(460px, calc(100vw - 30px)); padding: 16px; transform: translate(-50%,-50%); }
+.modal-window { border: 1px solid var(--line); border-radius: 8px; background: var(--surface); box-shadow: 0 18px 48px rgba(15,23,42,.24); }
 .arrival-summary { display: grid; gap: 6px; margin: 12px 0; }
 .arrival-summary div { display: grid; grid-template-columns: 60px 1fr; gap: 8px; padding: 7px; border: 1px solid var(--line); border-radius: 5px; }
 .arrival-summary span { color: var(--muted); }
+.gesture-window { width: min(680px, calc(100vw - 24px)); max-height: calc(100vh - 24px); overflow: auto; }
+.gesture-window-header { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 10px; }
+.gesture-preview {
+  position: relative;
+  width: 100%;
+  aspect-ratio: 16 / 9;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: #111827;
+}
+.gesture-preview video,
+.gesture-preview canvas { position: absolute; inset: 0; width: 100%; height: 100%; }
+.gesture-preview video { object-fit: fill; }
+.gesture-preview video { transform: scaleX(-1); }
+.gesture-preview canvas { pointer-events: none; }
+.gesture-camera-state {
+  position: absolute;
+  left: 8px;
+  bottom: 8px;
+  max-width: calc(100% - 16px);
+  padding: 4px 7px;
+  border-radius: 4px;
+  background: rgba(15,23,42,.82);
+  color: #fff;
+  font-size: 11px;
+  overflow-wrap: anywhere;
+}
+.gesture-readout { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 6px; margin-top: 8px; }
+.gesture-readout div { min-width: 0; padding: 7px; border: 1px solid var(--line); border-radius: 6px; }
+.gesture-readout span { display: block; color: var(--muted); font-size: 10px; }
+.gesture-readout strong { display: block; margin-top: 2px; overflow-wrap: anywhere; font-size: 13px; }
+.gesture-progress-row { display: grid; grid-template-columns: minmax(90px, auto) 1fr; align-items: center; gap: 8px; margin-top: 8px; color: var(--muted); font-size: 11px; }
+.gesture-progress-row progress { width: 100%; height: 8px; accent-color: var(--blue); }
+.gesture-enable { display: flex; align-items: center; gap: 7px; margin-top: 9px; font-size: 12px; font-weight: 750; }
+.gesture-enable input { width: 16px; height: 16px; }
 @media (max-width: 1050px) {
   .workspace { height: auto; min-height: 0; grid-template-columns: 1fr; }
   .vehicle-panel { overflow: visible; }
@@ -347,4 +395,7 @@ pre {
   .commands, .drive { grid-template-columns: repeat(3, minmax(0, 1fr)); }
   .message-row { grid-template-columns: 56px 70px minmax(0, 1fr); }
   .optical-blocked { min-height: 120px; font-size: 19px; }
+  .gesture-window { padding: 10px; }
+  .gesture-readout { grid-template-columns: 1fr; }
+  .gesture-progress-row { grid-template-columns: 1fr; }
 }
