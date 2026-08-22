@@ -471,6 +471,9 @@ function setAircraftTab(target) {
   els.slaveAircraftTab.classList.toggle("active", selectedAircraft === "aircraft_2");
   els.aircraftPanelTitle.textContent = selectedAircraft === "aircraft" ? "主机任务" : "从机任务";
   els.aircraftFollowBtn.hidden = selectedAircraft !== "aircraft_2";
+  window.dispatchEvent(new CustomEvent("groundstation:aircraft-target", {
+    detail: {target: selectedAircraft},
+  }));
   if (latestState) renderState(latestState);
   else renderMessages();
 }
@@ -573,6 +576,15 @@ async function postCommand(command, {quiet = false} = {}) {
     if (!quiet) showToast(`指令失败：${error.message}`, "danger");
     return {ok: false, error: error.message};
   }
+}
+
+function dispatchAircraftCommand(command, target = selectedAircraft) {
+  target = target === "aircraft_2" ? "aircraft_2" : "aircraft";
+  if (!latestState || !Core.aircraftCommandsAllowed(latestState, target)) {
+    showToast(target === "aircraft" ? "OPTICAL LINK BLOCKED" : "SLAVE OFFLINE", "danger");
+    return Promise.resolve({ok: false, error: "aircraft command unavailable"});
+  }
+  return postCommand({command, target});
 }
 
 async function uploadMission() {
@@ -699,14 +711,14 @@ for (const button of document.querySelectorAll("[data-command]")) {
   button.onclick = () => postCommand({command: button.dataset.command});
 }
 for (const button of document.querySelectorAll("[data-aircraft-command]")) {
-  button.onclick = () => {
-    if (!latestState || !Core.aircraftCommandsAllowed(latestState, selectedAircraft)) {
-      showToast(selectedAircraft === "aircraft" ? "OPTICAL LINK BLOCKED" : "SLAVE OFFLINE", "danger");
-      return;
-    }
-    postCommand({command: button.dataset.aircraftCommand, target: selectedAircraft});
-  };
+  button.onclick = () => dispatchAircraftCommand(button.dataset.aircraftCommand);
 }
+window.addEventListener("groundstation:gesture-command", (event) => {
+  const command = event.detail?.command;
+  const target = event.detail?.target;
+  if (!command || target !== selectedAircraft) return;
+  dispatchAircraftCommand(command, selectedAircraft);
+});
 for (const button of document.querySelectorAll("[data-steering]")) {
   button.addEventListener("pointerdown", (event) => {
     event.preventDefault();
