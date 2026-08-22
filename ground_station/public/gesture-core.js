@@ -1,7 +1,7 @@
 (function initGroundStationGestureCore(root, factory) {
   const api = factory();
   if (typeof module === "object" && module.exports) module.exports = api;
-  if (root) root.GroundStationGestureCore = api;
+  else if (root) root.GroundStationGestureCore = api;
 })(typeof globalThis === "object" ? globalThis : this, function groundStationGestureCore() {
   "use strict";
 

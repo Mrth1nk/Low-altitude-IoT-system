@@ -6,6 +6,7 @@ const fs = require("node:fs");
 const path = require("node:path");
 const vm = require("node:vm");
 
+delete globalThis.GroundStationGestureCore;
 const {
   createGestureStateMachine,
 } = require("../public/gesture-core.js");
@@ -13,6 +14,13 @@ const {
 function sample(gesture, now, target = "aircraft", confidence = 0.9) {
   return {gesture, confidence, now, target};
 }
+
+test("CommonJS require does not create a browser global", () => {
+  assert.equal(
+    Object.prototype.hasOwnProperty.call(globalThis, "GroundStationGestureCore"),
+    false,
+  );
+});
 
 test("Victory arms once after 1500 ms", () => {
   const fired = [];
