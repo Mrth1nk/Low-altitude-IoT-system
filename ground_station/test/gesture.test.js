@@ -10,11 +10,20 @@ delete globalThis.GroundStationGestureCore;
 const {
   createGestureSessionGate,
   createGestureStateMachine,
+  isGestureAircraftCommand,
 } = require("../public/gesture-core.js");
 
 function sample(gesture, now, target = "aircraft", confidence = 0.9) {
   return {gesture, confidence, now, target};
 }
+
+test("gesture command boundary accepts only arm and disarm", () => {
+  assert.equal(isGestureAircraftCommand("aircraft_arm"), true);
+  assert.equal(isGestureAircraftCommand("aircraft_disarm"), true);
+  assert.equal(isGestureAircraftCommand("aircraft_land"), false);
+  assert.equal(isGestureAircraftCommand("aircraft_auto"), false);
+  assert.equal(isGestureAircraftCommand(""), false);
+});
 
 test("stale camera sessions cannot act on a replacement session", () => {
   const gate = createGestureSessionGate();

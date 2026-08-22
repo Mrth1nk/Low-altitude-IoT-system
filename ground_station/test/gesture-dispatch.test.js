@@ -15,6 +15,7 @@ test("aircraft buttons and gesture events share one guarded dispatcher", () => {
   assert.match(app, /postCommand\(\{command, target\}\)/);
   assert.match(app, /button\.onclick = \(\) => dispatchAircraftCommand\(/);
   assert.match(app, /addEventListener\("groundstation:gesture-command"/);
+  assert.match(app, /isGestureAircraftCommand\(command\)/);
   assert.match(app, /dispatchAircraftCommand\(command, selectedAircraft\)/);
 });
 

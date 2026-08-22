@@ -716,7 +716,8 @@ for (const button of document.querySelectorAll("[data-aircraft-command]")) {
 window.addEventListener("groundstation:gesture-command", (event) => {
   const command = event.detail?.command;
   const target = event.detail?.target;
-  if (!command || target !== selectedAircraft) return;
+  if (!window.GroundStationGestureCore.isGestureAircraftCommand(command)
+      || target !== selectedAircraft) return;
   dispatchAircraftCommand(command, selectedAircraft);
 });
 for (const button of document.querySelectorAll("[data-steering]")) {

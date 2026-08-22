@@ -25,6 +25,10 @@
     };
   }
 
+  function isGestureAircraftCommand(command) {
+    return command === "aircraft_arm" || command === "aircraft_disarm";
+  }
+
   function validatePositiveDuration(value, gesture) {
     if (!Number.isFinite(value) || value <= 0) {
       throw new RangeError(`${gesture} hold duration must be positive`);
@@ -130,5 +134,9 @@
     };
   }
 
-  return {createGestureSessionGate, createGestureStateMachine};
+  return {
+    createGestureSessionGate,
+    createGestureStateMachine,
+    isGestureAircraftCommand,
+  };
 });
