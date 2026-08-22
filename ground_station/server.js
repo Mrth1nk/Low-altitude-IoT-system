@@ -469,8 +469,15 @@ function serveStatic(req, res) {
     return;
   }
   const ext = path.extname(filePath);
-  const type = ext === ".js" ? "application/javascript" : ext === ".css" ? "text/css" : "text/html";
-  res.writeHead(200, {"Content-Type": `${type}; charset=utf-8`});
+  const types = {
+    ".css": "text/css; charset=utf-8",
+    ".html": "text/html; charset=utf-8",
+    ".js": "application/javascript; charset=utf-8",
+    ".mjs": "application/javascript; charset=utf-8",
+    ".task": "application/octet-stream",
+    ".wasm": "application/wasm",
+  };
+  res.writeHead(200, {"Content-Type": types[ext] || "application/octet-stream"});
   fs.createReadStream(filePath).pipe(res);
 }
 
