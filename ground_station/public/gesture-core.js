@@ -9,6 +9,22 @@
   const DEFAULT_VICTORY_HOLD_MS = 1500;
   const DEFAULT_CLOSED_FIST_HOLD_MS = 1000;
 
+  function createGestureSessionGate() {
+    let generation = 0;
+    return {
+      begin() {
+        generation += 1;
+        return generation;
+      },
+      invalidate() {
+        generation += 1;
+      },
+      isCurrent(session) {
+        return session === generation;
+      },
+    };
+  }
+
   function validatePositiveDuration(value, gesture) {
     if (!Number.isFinite(value) || value <= 0) {
       throw new RangeError(`${gesture} hold duration must be positive`);
@@ -114,5 +130,5 @@
     };
   }
 
-  return {createGestureStateMachine};
+  return {createGestureSessionGate, createGestureStateMachine};
 });

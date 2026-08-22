@@ -24,10 +24,10 @@ let recognizer = null;
 let recognizerPromise = null;
 let stream = null;
 let animationFrame = 0;
-let sessionId = 0;
 let lastVideoTime = -1;
 let drawingUtils = null;
 let restoreFocus = null;
+const sessionGate = window.GroundStationGestureCore.createGestureSessionGate();
 
 const gestureMachine = window.GroundStationGestureCore.createGestureStateMachine(
   ({command, target}) => {
@@ -159,7 +159,7 @@ function renderResult(result, now) {
 }
 
 function runInference(activeSession) {
-  if (activeSession !== sessionId || !stream || document.hidden) return;
+  if (!sessionGate.isCurrent(activeSession) || !stream || document.hidden) return;
   try {
     if (elements.video.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA
         && elements.video.currentTime !== lastVideoTime) {
@@ -177,7 +177,7 @@ function runInference(activeSession) {
 }
 
 function stopSession(message = "摄像头未启动") {
-  sessionId += 1;
+  sessionGate.invalidate();
   if (animationFrame) cancelAnimationFrame(animationFrame);
   animationFrame = 0;
   if (stream) {
@@ -240,20 +240,21 @@ async function requestCamera() {
 }
 
 async function startSession() {
-  const activeSession = ++sessionId;
+  const activeSession = sessionGate.begin();
   resetReadout("正在启动");
   try {
     await loadRecognizer();
-    if (activeSession !== sessionId || !elements.enabled.checked) return;
+    if (!sessionGate.isCurrent(activeSession) || !elements.enabled.checked) return;
     setCameraState("正在请求摄像头");
     const nextStream = await requestCamera();
-    if (activeSession !== sessionId || !elements.enabled.checked) {
+    if (!sessionGate.isCurrent(activeSession) || !elements.enabled.checked) {
       for (const track of nextStream.getTracks()) track.stop();
       return;
     }
     stream = nextStream;
     for (const track of stream.getVideoTracks()) {
       track.addEventListener("ended", () => {
+        if (!sessionGate.isCurrent(activeSession)) return;
         stopSession("摄像头连接已结束");
         setStatus("摄像头已停止");
       }, {once: true});
@@ -261,13 +262,14 @@ async function startSession() {
     elements.video.srcObject = stream;
     await waitForVideoMetadata(elements.video);
     await elements.video.play();
-    if (activeSession !== sessionId) return;
+    if (!sessionGate.isCurrent(activeSession)) return;
     resizeCanvas();
     gestureMachine.enable(selectedTarget);
     setCameraState("摄像头运行中");
     setStatus("等待有效手势");
     runInference(activeSession);
   } catch (error) {
+    if (!sessionGate.isCurrent(activeSession)) return;
     stopSession(`不可用：${error.message || "启动失败"}`);
     setStatus("启动失败");
   }

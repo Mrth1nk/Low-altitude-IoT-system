@@ -8,12 +8,32 @@ const vm = require("node:vm");
 
 delete globalThis.GroundStationGestureCore;
 const {
+  createGestureSessionGate,
   createGestureStateMachine,
 } = require("../public/gesture-core.js");
 
 function sample(gesture, now, target = "aircraft", confidence = 0.9) {
   return {gesture, confidence, now, target};
 }
+
+test("stale camera sessions cannot act on a replacement session", () => {
+  const gate = createGestureSessionGate();
+  const first = gate.begin();
+  assert.equal(gate.isCurrent(first), true);
+
+  gate.invalidate();
+  const second = gate.begin();
+  assert.equal(gate.isCurrent(first), false);
+  assert.equal(gate.isCurrent(second), true);
+});
+
+test("invalidating a camera session keeps old callbacks stale", () => {
+  const gate = createGestureSessionGate();
+  const session = gate.begin();
+  gate.invalidate();
+  gate.invalidate();
+  assert.equal(gate.isCurrent(session), false);
+});
 
 test("CommonJS require does not create a browser global", () => {
   assert.equal(
