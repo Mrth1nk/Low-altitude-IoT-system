@@ -45,6 +45,7 @@ const alertKeys = new Set();
 let selectedVehicle = "rover";
 let selectedAircraft = "aircraft";
 let latestState = null;
+let forceSlaveBlocked = false;
 let currentTarget = {...FALLBACK};
 let map = null;
 let roverMarker = null;
@@ -119,6 +120,23 @@ function selectedAircraftState(state = latestState) {
   return selectedAircraft === "aircraft_2" ? state?.slave || {} : state?.aircraft || {};
 }
 
+function isEditableTarget(target) {
+  const tagName = String(target?.tagName || "").toUpperCase();
+  return ["INPUT", "TEXTAREA", "SELECT"].includes(tagName)
+    || Boolean(target && target.isContentEditable);
+}
+
+function setSlaveBlockedPreview(active) {
+  const next = Boolean(active);
+  if (forceSlaveBlocked === next) return;
+  forceSlaveBlocked = next;
+  if (latestState && selectedAircraft === "aircraft_2") renderState(latestState);
+}
+
+function clearTransientKeyboardState() {
+  setSlaveBlockedPreview(false);
+}
+
 function collectAircraftMessages(state, target) {
   const aircraft = target === "aircraft_2" ? state.slave || {} : state.aircraft || {};
   const blocked = target === "aircraft_2"
@@ -184,15 +202,17 @@ function renderState(state) {
   ]);
   const slaveOnline = selectedAircraft !== "aircraft_2"
     || Boolean(aircraft.state_fresh && aircraft.online);
-  const blocked = selectedAircraft === "aircraft_2"
+  const previewBlocked = selectedAircraft === "aircraft_2" && forceSlaveBlocked;
+  const blocked = previewBlocked || (selectedAircraft === "aircraft_2"
     ? Boolean(slaveOnline && aircraft.blocked)
-    : Boolean(state.optical?.blocked);
-  const allowed = Core.aircraftCommandsAllowed(state, selectedAircraft);
+    : Boolean(state.optical?.blocked));
+  const allowed = !previewBlocked
+    && Core.aircraftCommandsAllowed(state, selectedAircraft);
   els.blocked.hidden = !blocked;
   els.aircraftContent.hidden = false;
-  els.opticalBadge.textContent = !slaveOnline
-    ? "OFFLINE"
-    : blocked ? "BLOCKED" : aircraft.status || "OFFLINE";
+  els.opticalBadge.textContent = blocked
+    ? "BLOCKED"
+    : !slaveOnline ? "OFFLINE" : aircraft.status || "OFFLINE";
   els.opticalBadge.classList.toggle("locked", allowed);
   for (const button of document.querySelectorAll("[data-aircraft-command]")) {
     button.disabled = !allowed;
@@ -730,19 +750,33 @@ for (const button of document.querySelectorAll("[data-steering]")) {
   button.addEventListener("pointercancel", stopDrive);
 }
 window.addEventListener("keydown", (event) => {
+  if (event.key.toLowerCase() === "b" && !isEditableTarget(event.target)) {
+    event.preventDefault();
+    setSlaveBlockedPreview(true);
+    return;
+  }
   const key = driveKey(event.key);
-  if (!key || ["INPUT", "TEXTAREA"].includes(document.activeElement?.tagName)) return;
+  if (!key || isEditableTarget(event.target)) return;
   event.preventDefault();
   if (heldDriveKeys.has(key)) return;
   heldDriveKeys.add(key);
   syncKeyboardDrive();
 });
 window.addEventListener("keyup", (event) => {
+  if (event.key.toLowerCase() === "b") {
+    event.preventDefault();
+    setSlaveBlockedPreview(false);
+    return;
+  }
   const key = driveKey(event.key);
   if (!key || !heldDriveKeys.has(key)) return;
   event.preventDefault();
   heldDriveKeys.delete(key);
   syncKeyboardDrive();
+});
+window.addEventListener("blur", clearTransientKeyboardState);
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState === "hidden") clearTransientKeyboardState();
 });
 
 setVehicleMode("rover");
