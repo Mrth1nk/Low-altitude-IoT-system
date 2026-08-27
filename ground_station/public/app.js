@@ -62,7 +62,6 @@ const waypointMarkers = {rover: [], aircraft: [], aircraft_2: []};
 let mapFallback = {...FALLBACK};
 let roverTrack = [];
 let arrivalKey = "";
-let driveTimer = null;
 const DRIVE_KEYS = new Set([
   "w", "a", "s", "d", "arrowup", "arrowdown", "arrowleft", "arrowright",
 ]);
@@ -131,10 +130,6 @@ function setSlaveBlockedPreview(active) {
   if (forceSlaveBlocked === next) return;
   forceSlaveBlocked = next;
   if (latestState && selectedAircraft === "aircraft_2") renderState(latestState);
-}
-
-function clearTransientKeyboardState() {
-  setSlaveBlockedPreview(false);
 }
 
 function collectAircraftMessages(state, target) {
@@ -649,22 +644,11 @@ function startDrive(button) {
 }
 
 function startDrivePayload(payload) {
-  postCommand(payload);
-  clearInterval(driveTimer);
-  driveTimer = setInterval(() => postCommand(payload, {quiet: true}), 250);
-}
-
-function stopDriveRefresh() {
-  if (!driveTimer) return;
-  clearInterval(driveTimer);
-  driveTimer = null;
+  drivePump.update(payload.steering, payload.throttle);
 }
 
 function stopDrive() {
-  const wasDriving = Boolean(driveTimer);
-  stopDriveRefresh();
-  if (!wasDriving) return;
-  postCommand({command: "stop", steering: 0, throttle: 0}, {quiet: true});
+  drivePump.update(0, 0);
 }
 
 function driveKey(key) {
@@ -675,10 +659,25 @@ function driveKey(key) {
 function syncKeyboardDrive() {
   const drive = Core.composeDriveKeys(heldDriveKeys);
   if (!drive) {
-    stopDriveRefresh();
+    drivePump.update(0, 0);
     return;
   }
   startDrivePayload(drivePayload(drive[0], drive[1]));
+}
+
+const drivePump = Core.createDriveCommandPump(
+  (payload) => postCommand(payload, {quiet: true}),
+  {keepaliveMs: 700},
+);
+
+function neutralizeKeyboardDrive() {
+  heldDriveKeys.clear();
+  drivePump.update(0, 0);
+}
+
+function clearTransientKeyboardState() {
+  neutralizeKeyboardDrive();
+  setSlaveBlockedPreview(false);
 }
 
 async function refresh() {

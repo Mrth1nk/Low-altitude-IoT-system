@@ -57,6 +57,19 @@ class MavlinkTelemetryForwarderTests(unittest.TestCase):
 
         self.assertEqual(stream.frames, [frame])
 
+    def test_follow_target_bypasses_only_the_optical_telemetry_gate(self):
+        forwarder = MavlinkTelemetryForwarder()
+        stream = FakeStream()
+        heartbeat = b"\xfd\x00\x00\x00\x00\x01\x01\x00\x00\x00\x00\x00"
+        follow = b"\xfd\x00\x00\x00\x00\x01\x01\x90\x00\x00\x00\x00"
+
+        forwarder.enqueue(heartbeat)
+        forwarder.enqueue(follow, bypass_gate=True)
+        forwarder.drain_to(stream, allowed=False)
+
+        self.assertEqual(stream.frames, [follow])
+        self.assertEqual(forwarder.snapshot()["bypass_written"], 1)
+
 
 if __name__ == "__main__":
     unittest.main()

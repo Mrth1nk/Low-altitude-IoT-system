@@ -62,6 +62,7 @@ class MavlinkSession:
         self._transaction_queue = None
         self._reader_ident = None
         self._reader_worker = None
+        self.reader_error = None
         self._stop_reader = threading.Event()
         self._reader_ids = set()
         self._subscribers = []
@@ -99,6 +100,7 @@ class MavlinkSession:
         if self._reader_worker is not None and self._reader_worker.is_alive():
             return
         self._stop_reader.clear()
+        self.reader_error = None
         self._reader_worker = threading.Thread(
             target=self._reader_loop,
             name="aircraft-mavlink-reader",
@@ -112,8 +114,12 @@ class MavlinkSession:
             self._reader_worker.join(timeout=1)
 
     def _reader_loop(self):
-        while not self._stop_reader.is_set():
-            self.dispatch_once(timeout=0.1)
+        try:
+            while not self._stop_reader.is_set():
+                self.dispatch_once(timeout=0.1)
+        except Exception as exc:
+            self.reader_error = exc
+            self._stop_reader.set()
 
     def _begin_transaction(self):
         if not self._transaction_lock.acquire(blocking=False):

@@ -190,6 +190,29 @@
       && Boolean(aircraft.link_active)
       && Number.isFinite(aircraftAge)
       && aircraftAge <= 8;
+    if (
+      !aircraft.blocked
+      && stateFresh
+      && Number.isFinite(aircraftAge)
+      && aircraftAge > 8
+    ) {
+      const messageTimes = (Array.isArray(aircraft.messages) ? aircraft.messages : [])
+        .map((item) => Number(item?.time))
+        .filter((time) => Number.isFinite(time) && time > 0);
+      const lastMessageAt = messageTimes.length ? Math.max(...messageTimes) : 0;
+      const blockedAt = lastMessageAt > 0
+        ? lastMessageAt + 8
+        : cloudReceivedAt - aircraftAge + 8;
+      aircraft.blocked = true;
+      aircraft.status = "OPTICAL LINK BLOCKED";
+      aircraft.link_active = false;
+      aircraft.messages = [{
+        time: blockedAt,
+        type: "OPTICAL",
+        text: "BLOCKED",
+        key: `optical-blocked-${blockedAt}`,
+      }];
+    }
     if (!aircraft.blocked) {
       const structuredLink = Boolean(
         telemetry.aircraft_link || aircraft.link_active,
@@ -476,7 +499,9 @@
     }
     for (const code of ["command", "target_lat", "target_lng", "target_speed", "steering", "throttle"]) {
       const value = command[code];
-      if (value !== undefined && value !== null && value !== "") result[code] = value;
+      if (value !== undefined && value !== null && value !== "") {
+        result[code] = ["steering", "throttle"].includes(code) ? String(value) : value;
+      }
     }
     return result;
   }
@@ -601,6 +626,77 @@
     return steering || throttle ? [steering, throttle] : null;
   }
 
+  function createDriveCommandPump(send, {
+    keepaliveMs = 700,
+    now = () => Date.now(),
+    schedule = setTimeout,
+    cancel = clearTimeout,
+  } = {}) {
+    if (typeof send !== "function") throw new TypeError("drive send must be a function");
+    if (!Number.isFinite(keepaliveMs) || keepaliveMs <= 0) {
+      throw new RangeError("drive keepalive must be positive");
+    }
+
+    let desired = null;
+    let revision = 0;
+    let inFlight = false;
+    let timer = null;
+    let closed = false;
+
+    function clearTimer() {
+      if (timer === null) return;
+      cancel(timer);
+      timer = null;
+    }
+
+    async function pump() {
+      if (closed || inFlight || !desired) return;
+      const payload = {...desired};
+      const sentRevision = revision;
+      const startedAt = Number(now());
+      inFlight = true;
+      try {
+        await send(payload);
+      } catch {
+        // postCommand reports the user-visible error; keep the held input alive.
+      } finally {
+        inFlight = false;
+      }
+      if (closed) return;
+      if (revision !== sentRevision) {
+        void pump();
+        return;
+      }
+      if (!payload.steering && !payload.throttle) return;
+      const scheduledRevision = revision;
+      const elapsed = Math.max(0, Number(now()) - startedAt);
+      timer = schedule(() => {
+        timer = null;
+        if (closed || revision !== scheduledRevision) return;
+        void pump();
+      }, Math.max(0, keepaliveMs - elapsed));
+    }
+
+    function update(steering, throttle) {
+      if (closed) return;
+      desired = {
+        command: "manual",
+        steering: Math.max(-100, Math.min(100, Number(steering) || 0)),
+        throttle: Math.max(-100, Math.min(100, Number(throttle) || 0)),
+      };
+      revision += 1;
+      clearTimer();
+      void pump();
+    }
+
+    function close() {
+      closed = true;
+      clearTimer();
+    }
+
+    return {update, close};
+  }
+
   return {
     MAX_MISSION_ITEMS,
     appendAircraftMessages,
@@ -608,6 +704,7 @@
     aircraftHeartbeatSummary,
     buildMissionCommand,
     composeDriveKeys,
+    createDriveCommandPump,
     createGroundStationStores,
     distanceMeters,
     filterCommandProperties,

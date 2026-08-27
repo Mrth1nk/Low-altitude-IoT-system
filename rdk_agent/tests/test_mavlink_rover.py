@@ -41,6 +41,66 @@ class MavlinkRoverTests(unittest.TestCase):
         self.assertEqual(rover.scale_rc(50, 945, 1573, 1998), 1785)
         self.assertEqual(rover.scale_rc(-50, 945, 1573, 1998), 1259)
 
+    def test_manual_keepalive_reuses_confirmed_mode_until_heartbeat_changes(self):
+        rover = RoverMavlink([])
+        modes = []
+        overrides = []
+        rover.set_mode = lambda mode: modes.append(mode) or mode
+        rover.rc_override = lambda steering, throttle: overrides.append(
+            (steering, throttle)
+        )
+
+        rover.manual(0, 100)
+        rover.manual(-100, 100)
+
+        self.assertEqual(modes, ["MANUAL"])
+        self.assertEqual(overrides, [(0, 100), (-100, 100)])
+
+        rover._record_observed_mode("HOLD")
+        rover.manual(100, 0)
+
+        self.assertEqual(modes, ["MANUAL", "MANUAL"])
+        self.assertEqual(overrides[-1], (100, 0))
+        rover.mission_worker.close()
+
+    def test_manual_neutral_does_not_switch_out_of_hold(self):
+        rover = RoverMavlink([])
+        modes = []
+        overrides = []
+        rover.set_mode = lambda mode: modes.append(mode) or mode
+        rover.rc_override = lambda steering, throttle: overrides.append(
+            (steering, throttle)
+        )
+
+        rover.manual(0, 0)
+
+        self.assertEqual(modes, [])
+        self.assertEqual(overrides, [(0, 0)])
+        self.assertIsNone(rover._manual_control_mode)
+        rover.mission_worker.close()
+
+    def test_manual_motion_never_falls_back_to_hold(self):
+        rover = RoverMavlink([])
+        modes = []
+        overrides = []
+
+        def reject_manual(mode):
+            modes.append(mode)
+            raise RuntimeError("MANUAL not confirmed")
+
+        rover.set_mode = reject_manual
+        rover.rc_override = lambda steering, throttle: overrides.append(
+            (steering, throttle)
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "MANUAL not confirmed"):
+            rover.manual(0, 100)
+
+        self.assertEqual(modes, ["MANUAL"])
+        self.assertEqual(overrides, [])
+        self.assertIsNone(rover._manual_control_mode)
+        rover.mission_worker.close()
+
     def test_set_mode_waits_for_matching_flight_controller_heartbeat(self):
         class Heartbeat:
             mode = "AUTO"

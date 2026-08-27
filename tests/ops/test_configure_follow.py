@@ -71,6 +71,8 @@ class Connection:
         return self.heartbeat
 
     def recv_match(self, type=None, blocking=True, timeout=None):
+        if type == "HEARTBEAT":
+            return self.heartbeat
         del type, blocking, timeout
         if self.responses:
             name, value = self.responses.pop(0)
@@ -93,6 +95,41 @@ class Connection:
 
 
 class FollowConfigurationTests(unittest.TestCase):
+    def test_desired_geometry_is_five_metres_ahead_same_height_facing_leader(self):
+        self.assertEqual(FOLLOW_VALUES["FOLL_OFS_TYPE"], 1)
+        self.assertEqual(FOLLOW_VALUES["FOLL_OFS_X"], 5)
+        self.assertEqual(FOLLOW_VALUES["FOLL_OFS_Y"], 0)
+        self.assertEqual(FOLLOW_VALUES["FOLL_OFS_Z"], 0)
+        self.assertEqual(FOLLOW_VALUES["FOLL_YAW_BEHAVE"], 1)
+
+    def test_ignores_gcs_heartbeat_before_accepting_copter(self):
+        class MixedHeartbeatConnection(Connection):
+            def __init__(self):
+                super().__init__()
+                self.heartbeats = [
+                    Message("HEARTBEAT", type=6, base_mode=0, autopilot=8),
+                    self.heartbeat,
+                ]
+
+            def wait_heartbeat(self, timeout):
+                del timeout
+                return self.heartbeats.pop(0)
+
+            def recv_match(self, type=None, blocking=True, timeout=None):
+                if type == "HEARTBEAT" and self.heartbeats:
+                    return self.heartbeats.pop(0)
+                return super().recv_match(
+                    type=type, blocking=blocking, timeout=timeout
+                )
+
+        snapshot = collect_follow_snapshot(
+            MixedHeartbeatConnection(),
+            device="/dev/serial/by-id/usb-ArduPilot-test-if00",
+            timeout=0.1,
+        )
+
+        self.assertEqual(snapshot["vehicle_type"], 2)
+
     def test_slave_installer_deploys_recovery_tool(self):
         installer = (Path(__file__).resolve().parents[2] / "ops" / "install_slave.sh").read_text()
         self.assertIn("configure_follow.py", installer)
@@ -143,14 +180,15 @@ class FollowConfigurationTests(unittest.TestCase):
         result = apply_follow_values(connection, snapshot, timeout=0.1)
 
         self.assertTrue(result["verified"])
-        self.assertEqual(connection.values["FOLL_OFS_Y"], -5.0)
+        self.assertEqual(connection.values["FOLL_OFS_X"], 5.0)
+        self.assertEqual(connection.values["FOLL_OFS_Y"], 0.0)
 
     def test_unconfirmed_but_applied_parameter_is_included_in_rollback(self):
         class LostConfirmationConnection(Connection):
             def recv_match(self, type=None, blocking=True, timeout=None):
                 if (
-                    self.requested == "FOLL_OFS_Y"
-                    and self.values["FOLL_OFS_Y"] == -5.0
+                    self.requested == "FOLL_OFS_X"
+                    and self.values["FOLL_OFS_X"] == 5.0
                 ):
                     self.requested = None
                     return None

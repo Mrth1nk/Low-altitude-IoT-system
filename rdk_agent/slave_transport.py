@@ -361,7 +361,13 @@ class SlaveTransport:
                 self._diagnostics["rx_invalid"] += 1
                 continue
             if message["type"] == "status":
-                self._last_status = {**message["payload"], "updated_at": message["timestamp"]}
+                # The slave has no reliable RTC and may boot with a year-2000
+                # wall clock. Timestamp freshness at the cloud boundary with
+                # the rover's cellular-synchronised clock instead.
+                self._last_status = {
+                    **message["payload"],
+                    "updated_at": float(self.wall_clock()),
+                }
                 self._last_status_at = now
                 continue
             if message["type"] not in ("ack", "nack"):

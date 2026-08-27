@@ -38,6 +38,8 @@ class ConfigureRdkNetworkTests(unittest.TestCase):
         output = result.stdout + result.stderr
         self.assertEqual(result.returncode, 0, output)
         self.assertIn("woshinailong", output)
+        self.assertIn("ipv4.method manual", output)
+        self.assertIn("ipv4.addresses 192.168.4.2/24", output)
         self.assertIn("ipv4.never-default yes", output)
         self.assertIn("192.168.4.1/32", output)
         self.assertIn("wlan0", output)

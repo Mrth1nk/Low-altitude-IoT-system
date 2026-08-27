@@ -146,7 +146,14 @@ class AircraftGatewayState:
         self.last_seen = 0.0
         self.state_path = state_path
 
-    def record_packet(self, port: int, data: bytes, remote: tuple[str, int]) -> bool:
+    def record_packet(
+        self,
+        port: int,
+        data: bytes,
+        remote: tuple[str, int],
+        *,
+        touch_unparsed: bool = True,
+    ) -> bool:
         parser = self.parsers.setdefault(port, MavlinkParser())
         frames = parser.feed(data)
         now = time.time()
@@ -154,8 +161,9 @@ class AircraftGatewayState:
             self.bytes_received += len(data)
             self.packets_received += 1
             self.last_remote = f"{remote[0]}:{remote[1]} -> UDP {port}"
-            self.last_seen = now
-            if not frames:
+            if frames or touch_unparsed:
+                self.last_seen = now
+            if not frames and touch_unparsed:
                 self.messages.append({"time": now, "text": f"收到数传 {len(data)}B", "type": "RAW"})
             for frame in frames:
                 message = {"time": now, **frame}

@@ -95,6 +95,11 @@ class SlaveRuntime:
         self._closed = False
 
     def run_once(self):
+        reader_error = getattr(self.session, "reader_error", None)
+        if reader_error is not None:
+            raise RuntimeError(
+                f"MAVLink reader failed: {reader_error}"
+            ) from reader_error
         received = self.link.run_once()
         follow_received = (
             self.follow_receiver.run_once()

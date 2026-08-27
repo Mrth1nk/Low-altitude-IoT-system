@@ -36,6 +36,7 @@ class AircraftServiceTests(unittest.TestCase):
 
         self.assertIn("check_serial_roles.sh aircraft", aircraft)
         self.assertIn("DeviceAllow=/dev/ttyACM0 rw", aircraft)
+        self.assertIn("DeviceAllow=/dev/ttyACM1 rw", aircraft)
         self.assertIn("DeviceAllow=/dev/ttyUSB0 rw", aircraft)
         self.assertNotIn("/dev/ttyS9", aircraft)
         self.assertNotIn("/dev/video", aircraft)
@@ -46,10 +47,10 @@ class AircraftServiceTests(unittest.TestCase):
         self.assertNotIn("/dev/ttyACM0", vision)
         self.assertNotIn("/dev/ttyUSB0", vision)
 
+        self.assertIn("StartLimitIntervalSec=0", aircraft)
         for unit in (aircraft, vision):
             self.assertIn("Restart=on-failure", unit)
             self.assertIn("StartLimitIntervalSec=", unit)
-            self.assertIn("StartLimitBurst=", unit)
             self.assertIn("RuntimeDirectoryPreserve=yes", unit)
             self.assertIn(
                 "EnvironmentFile=/etc/low-altitude-iot/aircraft.env", unit
@@ -60,8 +61,8 @@ class AircraftServiceTests(unittest.TestCase):
         output = result.stdout + result.stderr
         self.assertEqual(result.returncode, 0, output)
         for expected in (
-            "/dev/ttyACM0",
-            "/dev/ttyUSB0",
+            "/dev/ttyACM*",
+            "/dev/ttyUSB*",
             "/dev/ttyS9",
             "/dev/video0",
             "by-id",
@@ -73,6 +74,8 @@ class AircraftServiceTests(unittest.TestCase):
             self.assertIn(expected, output)
 
         source = CHECK_ROLES.read_text()
+        self.assertIn('"/dev/ttyACM*"', source)
+        self.assertIn('"/dev/ttyUSB*"', source)
         self.assertIn("readlink -f", source)
         self.assertIn("udevadm info", source)
         self.assertIn("compgen -G", source)

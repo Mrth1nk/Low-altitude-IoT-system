@@ -137,6 +137,7 @@ class NodeCommandQueue:
         self.clock = clock
         self.max_age = float(max_age)
         self.max_future_skew = float(max_future_skew)
+        self._peer_clock_offset = None
         self._lock = threading.Lock()
         self._identities = {}
         self.delivery_store = delivery_store
@@ -158,13 +159,13 @@ class NodeCommandQueue:
             raise CommandRejected("invalid_source")
         if self.optical_gate is not None and not self.optical_gate.allows_commands():
             raise CommandRejected("optical_blocked")
-        age = float(self.clock()) - float(message["timestamp"])
-        if age > self.max_age:
-            raise CommandRejected("expired")
-        if age < -self.max_future_skew:
-            raise CommandRejected("future_timestamp")
         try:
             with self._lock:
+                age = self._message_age(message)
+                if age > self.max_age:
+                    raise CommandRejected("expired")
+                if age < -self.max_future_skew:
+                    raise CommandRejected("future_timestamp")
                 self._emit_stage("RECEIVED", message)
                 tracked = message["type"] in ("command", "mission_commit")
                 if tracked:
@@ -191,6 +192,15 @@ class NodeCommandQueue:
             raise
         except (TypeError, ValueError) as exc:
             raise CommandRejected(str(exc)) from exc
+
+    def _message_age(self, message):
+        local_timestamp = float(self.clock())
+        peer_timestamp = float(message["timestamp"])
+        if self._peer_clock_offset is None:
+            # The offline slave can boot with a year-2000 RTC; calibrate once
+            # to the already freshness-checked rover command stream.
+            self._peer_clock_offset = local_timestamp - peer_timestamp
+        return local_timestamp - (peer_timestamp + self._peer_clock_offset)
 
     def completed(self):
         """Return newly persisted worker results with original wire identity."""

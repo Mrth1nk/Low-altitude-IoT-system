@@ -87,7 +87,22 @@ class SlaveCommandQueueTests(unittest.TestCase):
         from slave_agent.command_queue import CommandRejected
 
         with tempfile.TemporaryDirectory() as tmp:
-            queue, inbox, _worker, _operations = self.make_queue(tmp, now=104.0)
+            now = [100.0]
+            from slave_agent.command_queue import NodeCommandQueue, ThreadSafeInbox
+
+            inbox = ThreadSafeInbox(DurableInbox(
+                AtomicJsonStore(Path(tmp) / "inbox.json"), max_queue=2
+            ))
+            queue = NodeCommandQueue(
+                inbox,
+                clock=lambda: now[0],
+                max_age=3.0,
+                delivery_store=AtomicJsonStore(Path(tmp) / "delivery.json"),
+            )
+            queue.accept(build_command_message(
+                action="guided", parameters={}, **identity(timestamp=100.0)
+            ))
+            now[0] = 104.0
             message = build_command_message(
                 action="guided", parameters={}, **identity(timestamp=100.0)
             )
@@ -95,7 +110,40 @@ class SlaveCommandQueueTests(unittest.TestCase):
             with self.assertRaisesRegex(CommandRejected, "expired"):
                 queue.accept(message)
 
-            self.assertIsNone(inbox.active)
+            self.assertIsNotNone(inbox.active)
+
+    def test_first_command_calibrates_unsynchronized_sender_clock(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            queue, inbox, _worker, _operations = self.make_queue(
+                tmp, now=946_684_800.0
+            )
+            message = build_command_message(
+                action="guided", parameters={}, **identity(timestamp=1_787_287_000.0)
+            )
+
+            accepted = queue.accept(message)
+
+            self.assertEqual(accepted.stage, "QUEUED")
+            self.assertIsNotNone(inbox.active)
+
+    def test_command_rejects_sender_clock_jump_after_calibration(self):
+        from slave_agent.command_queue import CommandRejected
+
+        with tempfile.TemporaryDirectory() as tmp:
+            queue, inbox, _worker, _operations = self.make_queue(tmp, now=100.0)
+            first_id = uuid.uuid4()
+            queue.accept(build_command_message(
+                action="guided", parameters={},
+                **identity(command_id=first_id, timestamp=100.0),
+            ))
+            message = build_command_message(
+                action="guided", parameters={}, **identity(timestamp=102.0)
+            )
+
+            with self.assertRaisesRegex(CommandRejected, "future_timestamp"):
+                queue.accept(message)
+
+            self.assertEqual(inbox.active["command_id"], str(first_id))
 
     def test_command_dedup_and_bounded_durable_queue(self):
         from slave_agent.command_queue import CommandRejected

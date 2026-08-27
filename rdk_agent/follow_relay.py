@@ -1,4 +1,4 @@
-"""Relay fresh leader FOLLOW_TARGET frames to the follower RDK."""
+"""Relay fresh leader GLOBAL_POSITION_INT frames to the follower RDK."""
 
 from __future__ import annotations
 
@@ -7,7 +7,7 @@ import threading
 import time
 
 
-FOLLOW_TARGET_MESSAGE_ID = 144
+FOLLOW_POSITION_MESSAGE_ID = 33
 
 
 class _MavlinkFrameStream:
@@ -75,7 +75,7 @@ class FollowTargetRelay:
                 continue
             message_id = frame[7] | (frame[8] << 8) | (frame[9] << 16)
             source_system = frame[5]
-            if message_id != FOLLOW_TARGET_MESSAGE_ID or source_system != 1:
+            if message_id != FOLLOW_POSITION_MESSAGE_ID or source_system != 1:
                 self._increment("rejected")
                 continue
             if now - observed_at > self.max_age_s:

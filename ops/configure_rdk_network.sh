@@ -8,6 +8,7 @@ WIFI_IFACE="${RDK_WIFI_INTERFACE:-wlan0}"
 SSID="${RDK_WIFI_SSID:-woshinailong}"
 PROFILE="${RDK_WIFI_PROFILE:-low-altitude-aircraft}"
 AIRCRAFT_HOST="${AIRCRAFT_HOST:-192.168.4.1}"
+RDK_WIFI_ADDRESS="${RDK_WIFI_ADDRESS:-192.168.4.2/24}"
 DEVELOPMENT_PROFILE="${RDK_DEVELOPMENT_PROFILE:-}"
 AUTOCONNECT_PRIORITY="${RDK_WIFI_AUTOCONNECT_PRIORITY:-200}"
 
@@ -95,7 +96,10 @@ fi
 run nmcli connection modify "$PROFILE" \
   802-11-wireless.ssid "$SSID" \
   802-11-wireless.mode infrastructure \
-  ipv4.method auto \
+  ipv4.method manual \
+  ipv4.addresses "$RDK_WIFI_ADDRESS" \
+  ipv4.gateway "" \
+  ipv4.dns "" \
   ipv4.never-default yes \
   ipv4.routes "$AIRCRAFT_HOST/32" \
   ipv6.never-default yes \

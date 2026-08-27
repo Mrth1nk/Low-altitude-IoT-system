@@ -288,7 +288,12 @@ function buildCommandsBody(properties) {
 
 function requiresAircraftGate(command) {
   const action = String(command?.command || command?.action || "");
-  const maintenance = action === "network_phone" || action === "network_aircraft";
+  const maintenance = [
+    "network_phone",
+    "network_aircraft",
+    "aircraft_2_network_phone",
+    "aircraft_2_network_aircraft",
+  ].includes(action);
   return isAircraftCommand(command) && !maintenance;
 }
 

@@ -111,6 +111,19 @@ class SlaveTransportTests(unittest.TestCase):
         self.assertEqual(self.sock.sent[0][1], ("192.168.4.3", 14620))
         self.assertTrue(result["accepted"])
 
+    def test_status_uses_rover_receive_time_when_slave_clock_reset_to_year_2000(self):
+        transport = self.make_transport()
+        self.wall[0] = 1_787_216_600.0
+        self.sock.incoming.append((
+            encode_node_message(slave_status(timestamp=946_685_157.0)),
+            ("192.168.4.3", 14620),
+        ))
+
+        state = transport.pump()
+
+        self.assertTrue(state["online"])
+        self.assertEqual(state["updated_at"], 1_787_216_600.0)
+
     def test_offline_slave_rejects_new_commands_without_sending(self):
         from rdk_agent.slave_transport import SlaveUnavailable
 

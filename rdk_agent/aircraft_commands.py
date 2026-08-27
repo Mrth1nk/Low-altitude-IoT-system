@@ -107,6 +107,12 @@ def _build_mavlink2_packet(
     return header + payload + struct.pack("<H", _x25_crc(crc_input))
 
 
+def build_gcs_heartbeat_packet() -> bytes:
+    """Build a passive MAVLink2 GCS heartbeat with no vehicle command."""
+    payload = struct.pack("<IBBBBB", 0, 6, 8, 0, 4, 3)
+    return _build_mavlink2_packet(0, payload)
+
+
 def _build_command_long(
     command: int,
     params: list[float],

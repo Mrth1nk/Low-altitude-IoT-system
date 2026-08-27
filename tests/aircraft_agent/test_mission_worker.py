@@ -117,6 +117,21 @@ def ready_telemetry(now=100.0):
 
 
 class MavlinkSessionTests(unittest.TestCase):
+    def test_background_reader_records_serial_failure_for_runtime_recovery(self):
+        class Connection:
+            mav = object()
+
+            def recv_match(self, blocking=True, timeout=None):
+                del blocking, timeout
+                raise OSError("serial disconnected")
+
+        session = MavlinkSession(Connection(), telemetry=AircraftTelemetry())
+        session.start_reader()
+        session._reader_worker.join(0.5)
+
+        self.assertIsInstance(session.reader_error, OSError)
+        self.assertIn("serial disconnected", str(session.reader_error))
+
     def test_single_reader_dispatches_same_message_to_transaction_and_telemetry(self):
         class Connection:
             def __init__(self):

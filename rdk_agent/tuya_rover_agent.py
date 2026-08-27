@@ -372,12 +372,13 @@ def run_agent(config: dict) -> int:
     ) if slave_node_enabled(config) else None
 
     def observe_aircraft_packet(data, remote):
+        relayed = follow_relay.observe(data, remote) if follow_relay else 0
         parsed = aircraft_gateway.record_packet(
             aircraft_local_port,
             data,
             remote,
+            touch_unparsed=relayed == 0,
         )
-        relayed = follow_relay.observe(data, remote) if follow_relay else 0
         return parsed or relayed > 0
 
     connected = False

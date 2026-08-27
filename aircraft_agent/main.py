@@ -222,8 +222,10 @@ class MavlinkTelemetryForwarder:
 
     def __init__(self, *, max_frames=256):
         self.frames = queue.Queue(maxsize=int(max_frames))
+        self.bypass_frames = queue.Queue(maxsize=int(max_frames))
         self.dropped = 0
         self.written = 0
+        self.bypass_written = 0
         self.bytes_written = 0
 
     def observe(self, message):
@@ -235,12 +237,13 @@ class MavlinkTelemetryForwarder:
             return
         self.enqueue(frame)
 
-    def enqueue(self, frame):
+    def enqueue(self, frame, *, bypass_gate=False):
         frame = bytes(frame)
         if not frame or frame[0] not in (0xFD, 0xFE):
             return False
         try:
-            self.frames.put_nowait(frame)
+            target = self.bypass_frames if bypass_gate else self.frames
+            target.put_nowait(frame)
             return True
         except queue.Full:
             self.dropped += 1
@@ -248,6 +251,16 @@ class MavlinkTelemetryForwarder:
 
     def drain_to(self, stream, *, allowed, limit=32):
         sent = 0
+        while sent < int(limit):
+            try:
+                frame = self.bypass_frames.get_nowait()
+            except queue.Empty:
+                break
+            stream.write(frame)
+            self.written += 1
+            self.bypass_written += 1
+            self.bytes_written += len(frame)
+            sent += 1
         while sent < int(limit):
             try:
                 frame = self.frames.get_nowait()
@@ -264,7 +277,9 @@ class MavlinkTelemetryForwarder:
     def snapshot(self):
         return {
             "queued": self.frames.qsize(),
+            "bypass_queued": self.bypass_frames.qsize(),
             "written": self.written,
+            "bypass_written": self.bypass_written,
             "bytes_written": self.bytes_written,
             "dropped": self.dropped,
         }
@@ -313,9 +328,10 @@ def run():
     session.subscribe(follow_target.observe)
     session.start_reader()
     for message_id, interval_us in (
+        (30, 100_000),  # ATTITUDE: 10 Hz for heading-relative Follow
         (1, 500_000),   # SYS_STATUS: 2 Hz
         (147, 1_000_000),  # BATTERY_STATUS: 1 Hz
-        (33, 500_000),  # GLOBAL_POSITION_INT: 2 Hz
+        (33, 100_000),  # GLOBAL_POSITION_INT: 10 Hz for relative-alt Follow
         (74, 500_000),  # VFR_HUD: 2 Hz
         (42, 1_000_000),  # MISSION_CURRENT: 1 Hz
     ):
@@ -366,12 +382,17 @@ def run():
         stream.write(challenge)
     try:
         while not stop.is_set():
+            reader_error = getattr(session, "reader_error", None)
+            if reader_error is not None:
+                raise RuntimeError(
+                    f"MAVLink reader failed: {reader_error}"
+                ) from reader_error
             optical = optical_reader.read()
             _apply_gate(gate, optical)
             try:
                 follow_frame = follow_target.next_frame()
                 if follow_frame is not None:
-                    telemetry_forwarder.enqueue(follow_frame)
+                    telemetry_forwarder.enqueue(follow_frame, bypass_gate=True)
             except Exception as exc:
                 last_error = f"follow_target:{type(exc).__name__}:{exc}"[:256]
             telemetry_forwarder.drain_to(

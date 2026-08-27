@@ -58,13 +58,12 @@ fi
 if ((PREFLIGHT)); then
   /usr/bin/python3 - "$FC_DEVICE" "$HEARTBEAT_TIMEOUT" <<'PY'
 import sys
+import time
 from pymavlink import mavutil
 
 device, timeout = sys.argv[1], float(sys.argv[2])
 link = mavutil.mavlink_connection(device, autoreconnect=False)
 try:
-    heartbeat = link.wait_heartbeat(timeout=timeout)
-    vehicle_type = int(getattr(heartbeat, "type", -1))
     copter_types = {
         mavutil.mavlink.MAV_TYPE_QUADROTOR,
         mavutil.mavlink.MAV_TYPE_HEXAROTOR,
@@ -72,8 +71,17 @@ try:
         mavutil.mavlink.MAV_TYPE_TRICOPTER,
         mavutil.mavlink.MAV_TYPE_HELICOPTER,
     }
-    if vehicle_type not in copter_types:
-        raise SystemExit(f"FAIL: heartbeat is not Copter type ({vehicle_type})")
+    deadline = time.monotonic() + timeout
+    heartbeat = None
+    while time.monotonic() < deadline:
+        candidate = link.recv_match(type="HEARTBEAT", blocking=True, timeout=max(0.01, deadline - time.monotonic()))
+        if candidate is None:
+            break
+        if int(getattr(candidate, "type", -1)) in copter_types:
+            heartbeat = candidate
+            break
+    if heartbeat is None:
+        raise SystemExit("FAIL: Copter heartbeat missing")
 finally:
     link.close()
 PY

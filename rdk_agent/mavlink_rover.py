@@ -59,6 +59,7 @@ class RoverMavlink:
         self.target_component = 0
         self.last_heartbeat = 0.0
         self.last_command_time = 0.0
+        self._manual_control_mode = None
         self.rc_params_loaded = False
         self.steer_min = 1000
         self.steer_trim = 1500
@@ -120,6 +121,7 @@ class RoverMavlink:
             except Exception:
                 pass
         self.conn = None
+        self._manual_control_mode = None
         self.connection_generation += 1
         self.home_valid = False
         self.home_updated_monotonic = 0.0
@@ -159,9 +161,11 @@ class RoverMavlink:
                 self.last_heartbeat = time.time()
                 telemetry.armed = bool(msg.base_mode & mavutil.mavlink.MAV_MODE_FLAG_SAFETY_ARMED)
                 try:
-                    telemetry.flight_mode = mavutil.mode_string_v10(msg).lower()
+                    observed_mode = mavutil.mode_string_v10(msg)
                 except Exception:
-                    telemetry.flight_mode = str(getattr(msg, "custom_mode", "unknown"))
+                    observed_mode = str(getattr(msg, "custom_mode", "unknown"))
+                telemetry.flight_mode = str(observed_mode).lower()
+                self._record_observed_mode(observed_mode)
             elif typ == "GLOBAL_POSITION_INT":
                 telemetry.lat = msg.lat / 1e7
                 telemetry.lng = msg.lon / 1e7
@@ -331,6 +335,8 @@ class RoverMavlink:
     def set_mode(self, mode: str, timeout: float = 2.5) -> str:
         with self.session_lock:
             requested = str(mode).strip().upper()
+            if self._manual_control_mode and requested != self._manual_control_mode:
+                self._manual_control_mode = None
             mapping = self.conn.mode_mapping() or {}
             if requested not in mapping:
                 raise RuntimeError(f"mode not available: {requested}")
@@ -376,13 +382,21 @@ class RoverMavlink:
         finally:
             self.session_lock.release()
 
+    def _record_observed_mode(self, mode: str) -> None:
+        observed = str(mode).strip().upper()
+        if self._manual_control_mode and observed != self._manual_control_mode:
+            self._manual_control_mode = None
+
     def manual(self, steering: int, throttle: int) -> None:
-        for mode in ("MANUAL", "HOLD"):
-            try:
-                self.set_mode(mode)
-                break
-            except Exception:
-                continue
+        if not steering and not throttle:
+            self.rc_override(0, 0)
+            return
+        if self._manual_control_mode != "MANUAL":
+            self._manual_control_mode = None
+            confirmed = str(self.set_mode("MANUAL")).strip().upper()
+            if confirmed != "MANUAL":
+                raise RuntimeError(f"MANUAL not confirmed: {confirmed}")
+            self._manual_control_mode = confirmed
         self.rc_override(steering, throttle)
 
     def neutral(self) -> None:

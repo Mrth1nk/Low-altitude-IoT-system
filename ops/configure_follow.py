@@ -19,9 +19,10 @@ FOLLOW_VALUES = {
     "FOLL_SYSID": 1,
     "FOLL_DIST_MAX": 30,
     "FOLL_OFS_TYPE": 1,
-    "FOLL_OFS_X": 0,
-    "FOLL_OFS_Y": -5,
+    "FOLL_OFS_X": 5,
+    "FOLL_OFS_Y": 0,
     "FOLL_OFS_Z": 0,
+    "FOLL_YAW_BEHAVE": 1,
     "FOLL_ALT_TYPE": 1,
 }
 
@@ -80,11 +81,21 @@ def _read_parameter(connection, name, timeout, *, expected=None):
 def _validate_vehicle(connection, device, timeout):
     if not str(device).startswith("/dev/serial/by-id/"):
         raise FollowConfigurationError("fixed /dev/serial/by-id device is required")
-    heartbeat = connection.wait_heartbeat(timeout=float(timeout))
+    deadline = time.monotonic() + float(timeout)
+    heartbeat = None
+    while time.monotonic() < deadline:
+        candidate = connection.recv_match(
+            type="HEARTBEAT",
+            blocking=True,
+            timeout=max(0.01, deadline - time.monotonic()),
+        )
+        if candidate is None:
+            break
+        if int(_field(candidate, "type", -1)) in COPTER_MAV_TYPES:
+            heartbeat = candidate
+            break
     if heartbeat is None:
-        raise FollowConfigurationError("flight controller heartbeat missing")
-    if int(_field(heartbeat, "type", -1)) not in COPTER_MAV_TYPES:
-        raise FollowConfigurationError("flight controller is not ArduCopter/Copter")
+        raise FollowConfigurationError("flight controller Copter heartbeat missing")
     if int(_field(heartbeat, "base_mode", 0) or 0) & 128:
         raise FollowConfigurationError("flight controller must be disarmed")
     return heartbeat

@@ -1,8 +1,6 @@
 [Unit]
 Description=Low-altitude aircraft link and mission agent
-After=dev-ttyACM0.device dev-ttyUSB0.device
-StartLimitIntervalSec=60
-StartLimitBurst=3
+StartLimitIntervalSec=0
 
 [Service]
 Type=simple
@@ -23,7 +21,13 @@ RuntimeDirectoryPreserve=yes
 UMask=0077
 DevicePolicy=closed
 DeviceAllow=/dev/ttyACM0 rw
+DeviceAllow=/dev/ttyACM1 rw
+DeviceAllow=/dev/ttyACM2 rw
+DeviceAllow=/dev/ttyACM3 rw
 DeviceAllow=/dev/ttyUSB0 rw
+DeviceAllow=/dev/ttyUSB1 rw
+DeviceAllow=/dev/ttyUSB2 rw
+DeviceAllow=/dev/ttyUSB3 rw
 NoNewPrivileges=yes
 PrivateTmp=yes
 

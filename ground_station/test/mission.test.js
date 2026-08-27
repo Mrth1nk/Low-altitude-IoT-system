@@ -7,6 +7,7 @@ const path = require("node:path");
 
 const {
   buildMissionCommand,
+  createDriveCommandPump,
   createGroundStationStores,
   filterCommandProperties,
   isAircraftCommand,
@@ -25,6 +26,77 @@ const points = [
   {lat: 32.1197, lng: 118.9531, speed: 0.8},
   {lat: 32.1198, lng: 118.9533, speed: 1.2},
 ];
+
+async function flushPromises() {
+  await Promise.resolve();
+  await Promise.resolve();
+}
+
+test("drive pump serializes requests and coalesces to the latest held keys", async () => {
+  const sent = [];
+  const releases = [];
+  const pump = createDriveCommandPump((payload) => {
+    sent.push(payload);
+    return new Promise((resolve) => releases.push(resolve));
+  });
+
+  pump.update(0, 100);
+  pump.update(-100, 100);
+  assert.deepEqual(sent, [{command: "manual", steering: 0, throttle: 100}]);
+
+  releases.shift()();
+  await flushPromises();
+  assert.deepEqual(sent.at(-1), {command: "manual", steering: -100, throttle: 100});
+  assert.equal(sent.length, 2);
+
+  pump.update(0, 0);
+  releases.shift()();
+  await flushPromises();
+  assert.deepEqual(sent.at(-1), {command: "manual", steering: 0, throttle: 0});
+  assert.equal(sent.length, 3);
+
+  releases.shift()();
+  await flushPromises();
+  assert.equal(sent.length, 3);
+  pump.close();
+});
+
+test("drive pump schedules a bounded keepalive only while input is held", async () => {
+  const sent = [];
+  const scheduled = [];
+  let currentTime = 1000;
+  const pump = createDriveCommandPump(
+    async (payload) => { sent.push(payload); },
+    {
+      keepaliveMs: 700,
+      now: () => currentTime,
+      schedule(callback, delay) {
+        const timer = {callback, delay, cancelled: false};
+        scheduled.push(timer);
+        return timer;
+      },
+      cancel(timer) { timer.cancelled = true; },
+    },
+  );
+
+  pump.update(100, 0);
+  await flushPromises();
+  assert.equal(sent.length, 1);
+  assert.equal(scheduled.length, 1);
+  assert.equal(scheduled[0].delay, 700);
+
+  currentTime += 700;
+  scheduled.shift().callback();
+  await flushPromises();
+  assert.equal(sent.length, 2);
+
+  pump.update(0, 0);
+  await flushPromises();
+  assert.deepEqual(sent.at(-1), {command: "manual", steering: 0, throttle: 0});
+  assert.equal(scheduled.length, 1);
+  assert.equal(scheduled[0].cancelled, true);
+  pump.close();
+});
 
 test("calculates the first segment from current position and later route segments", () => {
   const origin = {lat: 32.1197, lng: 118.9531};
@@ -280,6 +352,14 @@ test("server property filter emits only Tuya product DPs for simple commands", (
     "steering",
     "target_lat",
   ]);
+  assert.equal(filtered.steering, "10");
+});
+
+test("manual control serializes Tuya string DPs instead of rejected numbers", () => {
+  assert.deepEqual(
+    filterCommandProperties({command: "manual", steering: -100, throttle: 100}),
+    {command: "manual", steering: "-100", throttle: "100"},
+  );
 });
 
 test("Tuya send-property body serializes properties as the required JSON string", () => {
@@ -334,7 +414,7 @@ test("server property filter preserves hidden network mode commands", () => {
 
 test("slave maintenance network command bypasses offline flight gate", () => {
   assert.equal(
-    requiresAircraftGate({command: "network_phone", target: "aircraft_2"}),
+    requiresAircraftGate({command: "aircraft_2_network_phone", target: "aircraft_2"}),
     false,
   );
   assert.equal(

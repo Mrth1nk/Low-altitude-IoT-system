@@ -220,6 +220,30 @@ test("fresh nested aircraft heartbeat remains commandable", () => {
   assert.equal(aircraftCommandsAllowed(state), true);
 });
 
+test("fresh rover with stale aircraft heartbeat is optical blocked", () => {
+  const state = normalizeCloudState([{
+    code: "rover_state",
+    value: JSON.stringify({
+      updated_at: 1710000030,
+      aircraft_link: true,
+      aircraft: {
+        link_active: true,
+        last_seen_age_sec: 30,
+        mode: "LOITER",
+        armed: false,
+        messages: [],
+      },
+    }),
+  }], 1710000031000);
+
+  assert.equal(state.state_fresh, true);
+  assert.equal(state.optical.blocked, true);
+  assert.equal(state.aircraft.blocked, true);
+  assert.equal(state.aircraft.status, "OPTICAL LINK BLOCKED");
+  assert.equal(state.aircraft.messages[0].text, "BLOCKED");
+  assert.equal(aircraftCommandsAllowed(state), false);
+});
+
 test("fresh explicit aircraft link loss becomes a timed blocked message", () => {
   const state = normalizeCloudState([{
     code: "rover_state",

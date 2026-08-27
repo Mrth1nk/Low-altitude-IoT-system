@@ -3,7 +3,7 @@ import unittest
 from slave_agent.follow_receiver import FollowTargetReceiver
 
 
-def mavlink2_frame(*, message_id=144, source_system=1, payload=b"target"):
+def mavlink2_frame(*, message_id=33, source_system=1, payload=b"target"):
     return bytes((
         0xFD, len(payload), 0, 0, 9, source_system, 1,
         message_id & 0xFF,
@@ -69,7 +69,7 @@ class FollowTargetReceiverTests(unittest.TestCase):
         self.sock.incoming.extend([
             (mavlink2_frame(), ("192.168.4.9", 49152)),
             (mavlink2_frame(source_system=2), ("192.168.4.2", 49152)),
-            (mavlink2_frame(message_id=33), ("192.168.4.2", 49152)),
+            (mavlink2_frame(message_id=144), ("192.168.4.2", 49152)),
             (mavlink2_frame() + b"tail", ("192.168.4.2", 49152)),
         ])
 

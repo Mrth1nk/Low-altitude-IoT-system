@@ -1,16 +1,14 @@
-"""Build fresh leader state into standard MAVLink2 FOLLOW_TARGET frames."""
+"""Build leader state into MAVLink2 GLOBAL_POSITION_INT follow frames."""
 
 from __future__ import annotations
 
-import math
 import threading
 import time
 
 from .telemetry import field, message_type
 
 
-FOLLOW_TARGET_MESSAGE_ID = 144
-FOLLOW_TARGET_CAPABILITIES = 1 | 2 | 8 | 16
+FOLLOW_POSITION_MESSAGE_ID = 33
 
 
 def _source_system(message):
@@ -18,21 +16,6 @@ def _source_system(message):
         return int(message.get("source_system", message.get("sysid", 0)) or 0)
     getter = getattr(message, "get_srcSystem", None)
     return int(getter() if callable(getter) else 0)
-
-
-def _euler_quaternion(roll, pitch, yaw):
-    cr = math.cos(roll * 0.5)
-    sr = math.sin(roll * 0.5)
-    cp = math.cos(pitch * 0.5)
-    sp = math.sin(pitch * 0.5)
-    cy = math.cos(yaw * 0.5)
-    sy = math.sin(yaw * 0.5)
-    return (
-        cr * cp * cy + sr * sp * sy,
-        sr * cp * cy - cr * sp * sy,
-        cr * sp * cy + sr * cp * sy,
-        cr * cp * sy - sr * sp * cy,
-    )
 
 
 class PymavlinkFollowTargetEncoder:
@@ -47,9 +30,9 @@ class PymavlinkFollowTargetEncoder:
             return len(frame)
 
     def __init__(self, *, source_system=1, source_component=1):
-        from pymavlink import mavutil
+        from pymavlink.dialects.v20 import ardupilotmega as mavlink
 
-        self.mavlink = mavutil.mavlink
+        self.mavlink = mavlink
         self.capture = self._Capture()
         self.mav = self.mavlink.MAVLink(
             self.capture,
@@ -59,18 +42,16 @@ class PymavlinkFollowTargetEncoder:
         self._lock = threading.Lock()
 
     def encode(self, **fields):
-        message = self.mavlink.MAVLink_follow_target_message(
+        message = self.mavlink.MAVLink_global_position_int_message(
             int(fields["timestamp_ms"]),
-            int(fields["capabilities"]),
             int(fields["lat"]),
             int(fields["lon"]),
-            float(fields["alt"]),
-            tuple(fields["vel"]),
-            tuple(fields["acc"]),
-            tuple(fields["attitude_q"]),
-            tuple(fields["rates"]),
-            tuple(fields["position_cov"]),
-            int(fields["custom_state"]),
+            int(fields["alt"]),
+            int(fields["relative_alt"]),
+            int(fields["vx"]),
+            int(fields["vy"]),
+            int(fields["vz"]),
+            int(fields["hdg"]),
         )
         with self._lock:
             self.capture.frame = b""
@@ -106,8 +87,6 @@ class FollowTargetPublisher:
         self._position_at = None
         self._last_emit_at = None
         self._position = None
-        self._attitude_q = (1.0, 0.0, 0.0, 0.0)
-        self._rates = (0.0, 0.0, 0.0)
         self._produced = 0
         self._stale = 0
         self._dropped = 0
@@ -121,29 +100,20 @@ class FollowTargetPublisher:
             if kind == "HEARTBEAT":
                 self._heartbeat_at = now
             elif kind == "GLOBAL_POSITION_INT":
+                relative_alt = field(message, "relative_alt", None)
+                heading = field(message, "hdg", None)
                 self._position = {
                     "timestamp_ms": int(field(message, "time_boot_ms", now * 1000)),
                     "lat": int(field(message, "lat", 0) or 0),
                     "lon": int(field(message, "lon", 0) or 0),
-                    "alt": float(field(message, "alt", 0) or 0) / 1000.0,
-                    "vel": (
-                        float(field(message, "vx", 0) or 0) / 100.0,
-                        float(field(message, "vy", 0) or 0) / 100.0,
-                        float(field(message, "vz", 0) or 0) / 100.0,
-                    ),
+                    "alt": int(field(message, "alt", 0) or 0),
+                    "relative_alt": None if relative_alt is None else int(relative_alt),
+                    "vx": int(field(message, "vx", 0) or 0),
+                    "vy": int(field(message, "vy", 0) or 0),
+                    "vz": int(field(message, "vz", 0) or 0),
+                    "hdg": None if heading is None else int(heading),
                 }
                 self._position_at = now
-            elif kind == "ATTITUDE":
-                self._attitude_q = _euler_quaternion(
-                    float(field(message, "roll", 0.0) or 0.0),
-                    float(field(message, "pitch", 0.0) or 0.0),
-                    float(field(message, "yaw", 0.0) or 0.0),
-                )
-                self._rates = (
-                    float(field(message, "rollspeed", 0.0) or 0.0),
-                    float(field(message, "pitchspeed", 0.0) or 0.0),
-                    float(field(message, "yawspeed", 0.0) or 0.0),
-                )
 
     def next_frame(self):
         now = float(self.clock())
@@ -155,6 +125,9 @@ class FollowTargetPublisher:
                 and now - self._heartbeat_at <= self.max_age_s
                 and now - self._position_at <= self.max_age_s
                 and bool(self._position["lat"] and self._position["lon"])
+                and self._position["relative_alt"] is not None
+                and self._position["hdg"] is not None
+                and self._position["hdg"] != 0xFFFF
             )
             if not fresh:
                 self._stale += 1
@@ -166,15 +139,9 @@ class FollowTargetPublisher:
                 return None
             payload = dict(self._position)
             payload.update({
-                "message_id": FOLLOW_TARGET_MESSAGE_ID,
+                "message_id": FOLLOW_POSITION_MESSAGE_ID,
                 "source_system": self.source_system,
                 "source_component": self.source_component,
-                "capabilities": FOLLOW_TARGET_CAPABILITIES,
-                "acc": (0.0, 0.0, 0.0),
-                "attitude_q": self._attitude_q,
-                "rates": self._rates,
-                "position_cov": (0.0, 0.0, 0.0),
-                "custom_state": 0,
             })
             self._last_emit_at = now
         try:

@@ -17,6 +17,7 @@ class Connection:
 class Session:
     def __init__(self):
         self.connection = Connection()
+        self.reader_error = None
         self.subscribers = []
         self.reader_starts = 0
         self.requests = []
@@ -68,6 +69,30 @@ class FakeFollowReceiver:
 
 
 class SlaveRuntimeTests(unittest.TestCase):
+    def test_runtime_exits_when_mavlink_reader_loses_the_serial_device(self):
+        from slave_agent.main import SlaveRuntime
+
+        class BrokenSession(Session):
+            reader_error = RuntimeError("serial disconnected")
+
+            def __init__(self):
+                super().__init__()
+                self.reader_error = RuntimeError("serial disconnected")
+
+        runtime = SlaveRuntime(
+            config=None,
+            session=BrokenSession(),
+            worker=None,
+            link=FakeLink(),
+            inbox=None,
+            state=None,
+            health_store=None,
+            clock=lambda: 0.0,
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "MAVLink reader failed"):
+            runtime.run_once()
+
     def test_build_runtime_uses_fixed_by_id_and_single_reader(self):
         from slave_agent.main import SlaveConfig, build_runtime
 

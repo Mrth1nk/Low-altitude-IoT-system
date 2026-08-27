@@ -270,6 +270,34 @@ class AircraftTransportTests(unittest.TestCase):
         retry, _ = self.receive_frame()
         self.assertEqual(retry.message_type, MessageType.AUTH_CHALLENGE)
 
+    def test_plaintext_blocked_transport_sends_harmless_mavlink_heartbeat_probe(self):
+        transport = AircraftTransport(
+            self.link,
+            local_host="127.0.0.1",
+            local_port=0,
+            peer=self.peer.getsockname(),
+            psk=self.key,
+            clock=lambda: self.now,
+            plaintext=True,
+        )
+        try:
+            transport.pump(now=0.0)
+            packet, sender = self.peer.recvfrom(4096)
+            self.assertEqual(packet[0], 0xFD)
+            self.assertEqual(packet[7] | (packet[8] << 8) | (packet[9] << 16), 0)
+            self.assertEqual(sender, transport.local_address)
+
+            self.peer.settimeout(0.03)
+            transport.pump(now=0.5)
+            with self.assertRaises(socket.timeout):
+                self.peer.recvfrom(4096)
+
+            transport.pump(now=1.0)
+            retry, _ = self.peer.recvfrom(4096)
+            self.assertEqual(retry[0], 0xFD)
+        finally:
+            transport.close()
+
     def test_reassembles_authenticated_serial_stream_split_across_udp_packets(self):
         frame = Frame(
             MessageType.STATUS,

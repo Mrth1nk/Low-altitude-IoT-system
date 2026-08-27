@@ -36,6 +36,12 @@ class SlaveInstallTests(unittest.TestCase):
         self.assertNotIn("ttyACM0", unit)
         self.assertNotIn("ttyUSB0", unit)
 
+    def test_unit_does_not_permanently_rate_limit_serial_recovery(self):
+        unit = UNIT.read_text()
+
+        self.assertIn("StartLimitIntervalSec=0", unit)
+        self.assertIn("Restart=on-failure", unit)
+
     def test_health_dry_run_checks_identity_heartbeat_peer_and_occupancy(self):
         result = run_script(HEALTH, "--dry-run")
         output = result.stdout + result.stderr
@@ -46,6 +52,7 @@ class SlaveInstallTests(unittest.TestCase):
         source = HEALTH.read_text()
         self.assertIn("/etc/low-altitude-iot/slave.env", source)
         self.assertIn("follow_target", source)
+        self.assertIn('recv_match(type="HEARTBEAT"', source)
 
     def test_installer_is_atomic_reversible_and_does_not_reboot(self):
         with tempfile.TemporaryDirectory() as tmp:

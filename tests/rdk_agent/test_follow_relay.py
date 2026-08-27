@@ -3,7 +3,7 @@ import unittest
 from rdk_agent.follow_relay import FollowTargetRelay
 
 
-def mavlink2_frame(*, message_id=144, source_system=1, payload=b"target"):
+def mavlink2_frame(*, message_id=33, source_system=1, payload=b"target"):
     return bytes((
         0xFD,
         len(payload),
@@ -44,7 +44,7 @@ class FollowTargetRelayTests(unittest.TestCase):
     def tearDown(self):
         self.relay.close()
 
-    def test_relays_only_complete_follow_target_from_system_one(self):
+    def test_relays_only_complete_global_position_from_system_one(self):
         frame = mavlink2_frame()
 
         count = self.relay.observe(frame, observed_at=self.now)
@@ -63,7 +63,7 @@ class FollowTargetRelayTests(unittest.TestCase):
 
     def test_rejects_wrong_message_source_version_and_stale_observation(self):
         self.relay.observe(mavlink2_frame(source_system=2))
-        self.relay.observe(mavlink2_frame(message_id=33))
+        self.relay.observe(mavlink2_frame(message_id=144))
         self.relay.observe(b"\xfe\x00\x01\x01\x01\x90\x00\x00")
         self.relay.observe(mavlink2_frame(), observed_at=self.now - 1.51)
 

@@ -5,9 +5,15 @@ import time
 import uuid
 
 try:
-    from .aircraft_commands import build_aircraft_command_packets
+    from .aircraft_commands import (
+        build_aircraft_command_packets,
+        build_gcs_heartbeat_packet,
+    )
 except ImportError:
-    from aircraft_commands import build_aircraft_command_packets
+    from aircraft_commands import (
+        build_aircraft_command_packets,
+        build_gcs_heartbeat_packet,
+    )
 from shared_protocol.auth import (
     AuthError,
     AuthenticatedDatagramCodec,
@@ -214,9 +220,16 @@ class AircraftTransport:
         return self.transaction_state()
 
     def _send_bootstrap(self, now):
-        if self._plaintext:
-            return
         if now < self._next_bootstrap_at:
+            return
+        if self._plaintext:
+            self._next_bootstrap_at = now + 1.0
+            try:
+                packet = build_gcs_heartbeat_packet()
+                for peer in self._command_peers:
+                    self._socket.sendto(packet, peer)
+            except OSError as exc:
+                self._schedule_reopen(now, f"bootstrap send failed: {exc}")
             return
         probe = Frame(
             MessageType.AUTH_CHALLENGE,

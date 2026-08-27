@@ -11,9 +11,9 @@ case "$ROLE" in aircraft|vision|all) ;; *) echo "usage: $0 [--dry-run] aircraft|
 
 if ((DRY_RUN)); then
   cat <<'EOF'
-CHECK aircraft FC by-id pattern -> unique /dev/ttyACM0; ambiguous or missing fails
-CHECK aircraft link by-id pattern -> unique /dev/ttyUSB0; ambiguous or missing fails
-CHECK readlink -f and udevadm info identity for /dev/ttyACM0 and /dev/ttyUSB0
+CHECK aircraft FC by-id pattern -> unique /dev/ttyACM*; ambiguous or missing fails
+CHECK aircraft link by-id pattern -> unique /dev/ttyUSB*; ambiguous or missing fails
+CHECK readlink -f and udevadm info identity for resolved aircraft devices
 CHECK vision udevadm info identity for /dev/ttyS9 and /dev/video0
 CHECK all resolved role devices are distinct
 CHECK lsof and fuser report every device unoccupied; device is busy fails
@@ -29,7 +29,7 @@ for tool in readlink udevadm lsof fuser; do
 done
 
 resolve_unique_by_id() {
-  local pattern="$1" expected="$2" label="$3"
+  local pattern="$1" expected_pattern="$2" label="$3"
   local matches=() candidate resolved
   if [[ -e "$pattern" || -L "$pattern" ]]; then
     matches+=("$pattern")
@@ -43,10 +43,13 @@ resolve_unique_by_id() {
     return 1
   fi
   resolved="$(readlink -f "${matches[0]}")"
-  [[ "$resolved" == "$expected" ]] || {
-    echo "$label resolved to $resolved, expected $expected" >&2
-    return 1
-  }
+  case "$resolved" in
+    $expected_pattern) ;;
+    *)
+      echo "$label resolved to $resolved, expected $expected_pattern" >&2
+      return 1
+      ;;
+  esac
   udevadm info --query=property --name="$resolved" >/dev/null
   printf '%s\n' "$resolved"
 }
@@ -73,8 +76,8 @@ check_busy() {
 
 devices=()
 if [[ "$ROLE" == aircraft || "$ROLE" == all ]]; then
-  fc="$(resolve_unique_by_id "${AIRCRAFT_FC_BY_ID:?AIRCRAFT_FC_BY_ID required}" /dev/ttyACM0 "flight controller")"
-  link="$(resolve_unique_by_id "${AIRCRAFT_LINK_BY_ID:?AIRCRAFT_LINK_BY_ID required}" /dev/ttyUSB0 "aircraft link")"
+  fc="$(resolve_unique_by_id "${AIRCRAFT_FC_BY_ID:?AIRCRAFT_FC_BY_ID required}" "/dev/ttyACM*" "flight controller")"
+  link="$(resolve_unique_by_id "${AIRCRAFT_LINK_BY_ID:?AIRCRAFT_LINK_BY_ID required}" "/dev/ttyUSB*" "aircraft link")"
   devices+=("$fc" "$link")
 fi
 if [[ "$ROLE" == vision || "$ROLE" == all ]]; then

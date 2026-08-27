@@ -1,4 +1,4 @@
-"""Receive leader FOLLOW_TARGET frames and inject via the sole FC session."""
+"""Receive leader GLOBAL_POSITION_INT frames through the sole FC session."""
 
 from __future__ import annotations
 
@@ -7,10 +7,10 @@ import threading
 import time
 
 
-FOLLOW_TARGET_MESSAGE_ID = 144
+FOLLOW_POSITION_MESSAGE_ID = 33
 
 
-def _exact_mavlink2_follow_target(frame):
+def _exact_mavlink2_follow_position(frame):
     frame = bytes(frame)
     if len(frame) < 12 or frame[0] != 0xFD:
         return False
@@ -19,7 +19,7 @@ def _exact_mavlink2_follow_target(frame):
     if len(frame) != expected_length:
         return False
     message_id = frame[7] | (frame[8] << 8) | (frame[9] << 16)
-    return message_id == FOLLOW_TARGET_MESSAGE_ID and frame[5] == 1
+    return message_id == FOLLOW_POSITION_MESSAGE_ID and frame[5] == 1
 
 
 class FollowTargetReceiver:
@@ -56,7 +56,7 @@ class FollowTargetReceiver:
             except OSError:
                 self._increment("write_errors")
                 break
-            if str(peer[0]) != self.rover_ip or not _exact_mavlink2_follow_target(frame):
+            if str(peer[0]) != self.rover_ip or not _exact_mavlink2_follow_position(frame):
                 self._increment("rejected")
                 continue
             try:
